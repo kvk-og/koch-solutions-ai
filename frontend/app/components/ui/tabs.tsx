@@ -43,7 +43,7 @@ export function Tabs({ defaultValue, value: controlledValue, onValueChange: setC
 // TabsList Component
 export function TabsList({ className = "", children }: { className?: string; children: ReactNode }) {
   return (
-    <div className={`inline-flex h-10 items-center justify-center rounded-md bg-surface-elevated border border-border p-1 text-koch-400 ${className}`}>
+    <div className={`inline-flex h-10 items-center justify-center rounded-md bg-card border border-border p-1 text-muted-foreground ${className}`}>
       {children}
     </div>
   );
@@ -65,8 +65,8 @@ export function TabsTrigger({ value, className = "", children, disabled = false 
       onClick={() => context.onValueChange(value)}
       className={`inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:pointer-events-none disabled:opacity-50 ${
         isActive 
-          ? "bg-surface text-koch-50 shadow-sm border border-border" 
-          : "hover:text-koch-100 hover:bg-surface-overlay/50 border border-transparent"
+          ? "bg-background text-foreground shadow-sm border border-border" 
+          : "hover:text-foreground hover:bg-background-overlay/50 border border-transparent"
       } ${className}`}
     >
       {children}

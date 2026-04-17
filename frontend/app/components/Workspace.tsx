@@ -11,12 +11,12 @@ export default function Workspace({ reportContent, setReportContent }: Workspace
   const [activeTab, setActiveTab] = useState<'canvas' | 'editor'>('editor');
 
   return (
-    <div className="flex flex-col h-full bg-surface-elevated border-l border-border w-1/2 min-w-[400px]">
-      <div className="flex px-4 pt-3 border-b border-border bg-surface/80 backdrop-blur-lg">
+    <div className="flex flex-col h-full bg-card border-l border-border w-1/2 min-w-[400px]">
+      <div className="flex px-4 pt-3 border-b border-border bg-background/80 backdrop-blur-lg">
         <button
           onClick={() => setActiveTab('editor')}
           className={`px-4 py-2 font-medium text-sm transition-colors border-b-2 ${
-            activeTab === 'editor' ? 'border-accent text-accent' : 'border-transparent text-koch-400 hover:text-koch-200'
+            activeTab === 'editor' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'
           }`}
         >
           Report Editor
@@ -24,7 +24,7 @@ export default function Workspace({ reportContent, setReportContent }: Workspace
         <button
           onClick={() => setActiveTab('canvas')}
           className={`px-4 py-2 font-medium text-sm transition-colors border-b-2 ${
-            activeTab === 'canvas' ? 'border-accent text-accent' : 'border-transparent text-koch-400 hover:text-koch-200'
+            activeTab === 'canvas' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'
           }`}
         >
           Memory Canvas

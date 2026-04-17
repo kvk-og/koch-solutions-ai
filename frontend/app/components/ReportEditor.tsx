@@ -35,27 +35,27 @@ export default function ReportEditor({ reportContent, setReportContent }: Report
   };
 
   return (
-    <div className="flex flex-col h-full bg-surface">
-      <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-surface-elevated">
+    <div className="flex flex-col h-full bg-background">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-card">
         <div className="flex items-center gap-2">
           <button 
             onClick={() => setIsPreview(false)}
-            className={`px-3 py-1 rounded-md text-sm transition-colors ${!isPreview ? 'bg-accent/20 text-accent' : 'text-koch-400 hover:text-koch-200'}`}
+            className={`px-3 py-1 rounded-md text-sm transition-colors ${!isPreview ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:text-foreground'}`}
           >
             Edit
           </button>
           <button 
             onClick={() => setIsPreview(true)}
-            className={`px-3 py-1 rounded-md text-sm transition-colors ${isPreview ? 'bg-accent/20 text-accent' : 'text-koch-400 hover:text-koch-200'}`}
+            className={`px-3 py-1 rounded-md text-sm transition-colors ${isPreview ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:text-foreground'}`}
           >
             Preview
           </button>
         </div>
         <div className="flex items-center gap-3">
-          {saveStatus && <span className="text-xs text-koch-400">{saveStatus}</span>}
+          {saveStatus && <span className="text-xs text-muted-foreground">{saveStatus}</span>}
           <button 
             onClick={handleSave}
-            className="px-4 py-1.5 rounded-lg bg-surface border border-border hover:border-accent/40 text-sm text-koch-100 transition-colors"
+            className="px-4 py-1.5 rounded-lg bg-background border border-border hover:border-primary/40 text-sm text-foreground transition-colors"
           >
             Save Report
           </button>
@@ -67,11 +67,11 @@ export default function ReportEditor({ reportContent, setReportContent }: Report
           <textarea
             value={reportContent}
             onChange={(e) => setReportContent(e.target.value)}
-            className="w-full h-full p-6 resize-none bg-transparent font-mono text-sm text-koch-100 focus:outline-none placeholder-koch-600"
+            className="w-full h-full p-6 resize-none bg-transparent font-mono text-sm text-foreground focus:outline-none placeholder-muted-foreground"
             placeholder="Draft your engineering report here. Drop snippets from chat directly."
           />
         ) : (
-          <div className="w-full h-full p-6 overflow-y-auto prose prose-invert prose-sm max-w-none text-koch-100">
+          <div className="w-full h-full p-6 overflow-y-auto prose prose-invert prose-sm max-w-none text-foreground">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
               {reportContent || "No content yet."}
             </ReactMarkdown>

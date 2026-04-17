@@ -5,7 +5,7 @@ from functools import wraps
 
 import httpx
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # =============================================================================
 # Configuration
@@ -141,6 +141,43 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.error(f"Failed to query LLM: {e}")
         await status_msg.edit_text(f"❌ Backend communication error while querying Hermes Agent.")
 
+@authorized_only
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    caption = update.message.caption or ""
+    
+    import re
+    match = re.search(r"#([a-zA-Z0-9_-]+)", caption)
+    if match:
+        machine_id = match.group(1)
+    else:
+        parts = caption.split()
+        if parts:
+            machine_id = parts[0]
+        else:
+            await update.message.reply_text("❌ Please provide a Machine ID in the caption (e.g. #Machine04).")
+            return
+            
+    photo_file = await update.message.photo[-1].get_file()
+    status_msg = await update.message.reply_text(f"📸 Uploading photo for `{machine_id}` to KOCH AI...", parse_mode="Markdown")
+    
+    try:
+        photo_bytes = await photo_file.download_as_bytearray()
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            files = {'file': ('photo.jpg', bytes(photo_bytes), 'image/jpeg')}
+            data = {'machine_id': machine_id}
+            response = await client.post(
+                f"{BACKEND_API_URL}/api/upload/photo",
+                data=data,
+                files=files
+            )
+            response.raise_for_status()
+            
+        await status_msg.edit_text(f"✅ Photo uploaded for `{machine_id}`. A background worker is extracting metadata and analyzing the image.", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Failed to post photo: {e}")
+        await status_msg.edit_text(f"❌ Failed to reach the KOCH AI backend to process the photo.")
+
 
 def main() -> None:
     if not TOKEN:
@@ -152,6 +189,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", help_command))
     application.add_handler(CommandHandler("note", note_command))
     application.add_handler(CommandHandler("ask", ask_command))
+    application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
     logger.info("KOCH AI Field Assistant Bot Starting...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

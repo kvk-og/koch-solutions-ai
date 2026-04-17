@@ -24,12 +24,13 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from openai import AsyncOpenAI
-
+import celery
+import shutil
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -47,6 +48,7 @@ CAD_WORKER_BASE_URL = os.getenv("CAD_WORKER_BASE_URL", "http://cad-workers:9001"
 
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "100"))
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 # Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -82,6 +84,10 @@ vllm_client: Optional[AsyncOpenAI] = None
 
 # General HTTP client for Hindsight and Worker communication
 http_client: Optional[httpx.AsyncClient] = None
+
+# Celery application for dispatching background tasks
+celery_app = celery.Celery("backend_client", broker=REDIS_URL)
+
 
 
 @app.on_event("startup")
@@ -490,6 +496,53 @@ async def upload_file(file: UploadFile = File(...)):
         pipeline=pipeline,
         status=status,
         message=message,
+    )
+
+
+# -------------------------------------------------------------------------
+# POST /api/upload/photo — Smart Photo Ingestion via Celery
+# -------------------------------------------------------------------------
+
+@app.post("/api/upload/photo", response_model=UploadResponse, tags=["Documents"])
+async def upload_photo(machine_id: str = Form(...), file: UploadFile = File(...)):
+    """
+    Accept an image file along with a machine ID, save the file temporarily,
+    and submit the processing task to the Celery image processing worker.
+    """
+    # 1. Save file temporarily to the shared volume
+    os.makedirs("/app/uploads", exist_ok=True)
+    temp_file_id = str(uuid.uuid4())
+    _, ext = os.path.splitext(file.filename or "")
+    if not ext:
+        ext = ".jpg"
+    temp_filepath = f"/app/uploads/{temp_file_id}{ext}"
+    
+    try:
+        with open(temp_filepath, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        logger.error(f"Failed to save temp file for photo: {e}")
+        raise HTTPException(status_code=500, detail="Failed to stage file for processing.")
+        
+    # 2. Dispatch to Celery queue
+    try:
+        task = celery_app.send_task(
+            "image_processor.process_photo_task", 
+            args=[temp_filepath, machine_id]
+        )
+        job_id = task.id
+        logger.info(f"Dispatched photo {temp_filepath} for machine {machine_id} to celery. Job ID: {job_id}")
+    except Exception as e:
+        logger.error(f"Failed to dispatch to Celery: {e}")
+        raise HTTPException(status_code=500, detail="Worker queue unavailable.")
+        
+    return UploadResponse(
+        file_id=job_id,
+        filename=file.filename or "unknown",
+        content_type=file.content_type or "image/jpeg",
+        pipeline="celery_image_processor",
+        status="queued",
+        message="Photo dispatched to background worker for smart ingestion.",
     )
 
 

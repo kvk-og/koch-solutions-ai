@@ -27,6 +27,8 @@ volumes:
     driver: local
   model-cache:
     driver: local
+  shared-uploads:
+    driver: local
 
 # ---------------------------------------------------------------------------
 # Services
@@ -96,6 +98,7 @@ services:
     volumes:
       - ./backend:/app                 # Hot-reload in development
       - /app/__pycache__               # Exclude bytecode cache
+      - shared-uploads:/app/uploads    # Shared volume for temporary celery uploads
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
@@ -121,6 +124,41 @@ services:
       backend-api:
         condition: service_healthy
 
+  # =========================================================================
+  # 8. Redis Broker — Message Queue for Celery
+  # =========================================================================
+  redis:
+    image: redis:alpine
+    container_name: koch-redis
+    restart: unless-stopped
+    networks:
+      - koch-internal
+    ports:
+      - "6379:6379"
+
+  # =========================================================================
+  # 9. Image Processor Worker — Celery Pipeline for Photo Ingestion
+  # =========================================================================
+  image-processor:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    container_name: koch-image-processor
+    restart: unless-stopped
+    command: ["celery", "-A", "image_processor.celery_app", "worker", "--loglevel=info"]
+    networks:
+      - koch-internal
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - HINDSIGHT_BASE_URL=http://hindsight:8888
+    depends_on:
+      - redis
+    volumes:
+      - ./workers:/app
+      - /app/__pycache__
+      - shared-uploads:/app/uploads
   # =========================================================================
   # 5. Parser Workers — Document Ingestion Pipeline (Docling + VLM)
   # =========================================================================

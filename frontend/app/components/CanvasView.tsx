@@ -46,7 +46,7 @@ export default function CanvasView() {
 
   return (
     <div 
-      className="w-full h-full bg-surface-overlay"
+      className="w-full h-full bg-background-overlay"
       onDrop={handleDrop}
       onDragOver={handleDragOver}
     >
@@ -57,13 +57,13 @@ export default function CanvasView() {
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         fitView
-        className="koch-theme-flow"
+        className="light-theme-flow"
       >
-        <Controls className="bg-surface-elevated border border-border fill-koch-500" />
+        <Controls className="bg-card border border-border fill-muted-foreground" />
         <MiniMap 
             nodeColor="#3b82f6" 
             maskColor="rgba(0, 0, 0, 0.4)" 
-            className="bg-surface-elevated border border-border"
+            className="bg-card border border-border"
         />
         <Background color="#334155" gap={16} />
       </ReactFlow>

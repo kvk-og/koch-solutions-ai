@@ -26,3 +26,7 @@ sse-starlette==2.2.1
 
 # Logging
 structlog==24.4.0
+
+# Celery for asynchronous processing
+celery==5.4.0
+redis==5.0.3

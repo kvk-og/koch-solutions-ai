@@ -1,75 +1,82 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* =========================================================================
-   KOCH AI — Global Styles
-   Enterprise dark theme with industrial aesthetic
-   ========================================================================= */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3.9%;
+    --primary: 0 0% 9%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 0 0% 96.1%;
+    --secondary-foreground: 0 0% 9%;
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+    --accent: 0 0% 96.1%;
+    --accent-foreground: 0 0% 9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 89.8%;
+    --input: 0 0% 89.8%;
+    --ring: 0 0% 3.9%;
+    --radius: 0.5rem;
+  }
+}
 
 @layer base {
   * {
+    @apply border-border;
     box-sizing: border-box;
     margin: 0;
     padding: 0;
   }
-
-  html {
-    color-scheme: dark;
-  }
-
   body {
-    @apply bg-surface text-koch-100 font-sans antialiased;
+    @apply bg-background text-foreground font-sans antialiased;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
 
-  /* Scrollbar styling for the dark theme */
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
   ::-webkit-scrollbar-track {
-    @apply bg-surface;
+    @apply bg-muted;
   }
   ::-webkit-scrollbar-thumb {
-    @apply bg-koch-700 rounded-full;
+    @apply bg-muted-foreground/30 rounded-full;
   }
   ::-webkit-scrollbar-thumb:hover {
-    @apply bg-koch-600;
+    @apply bg-muted-foreground/50;
   }
 
-  /* Selection highlight */
   ::selection {
-    @apply bg-accent/20 text-accent-100;
+    @apply bg-primary/20 text-foreground;
   }
 }
 
 @layer components {
-  /* Glass-effect panels */
   .glass-panel {
-    @apply bg-surface-elevated/80 backdrop-blur-xl border border-border rounded-xl;
+    @apply bg-background/80 backdrop-blur-xl border border-border rounded-xl;
   }
-
-  /* Subtle glow effect for active/focused elements */
   .glow-accent {
-    box-shadow: 0 0 20px rgba(255, 255, 255, 0.1),
-                0 0 60px rgba(255, 255, 255, 0.05);
+    box-shadow: 0 0 20px rgba(0, 0, 0, 0.05),
+                0 0 60px rgba(0, 0, 0, 0.02);
   }
-
-  /* Message bubble base styles */
   .message-user {
-    @apply bg-accent/10 border border-accent/20 rounded-2xl rounded-br-md;
+    @apply bg-primary text-primary-foreground border-transparent rounded-2xl rounded-br-md;
   }
-
   .message-ai {
-    @apply bg-surface-elevated border border-border rounded-2xl rounded-bl-md;
+    @apply bg-muted border border-border rounded-2xl rounded-bl-md;
   }
 
-  /* Typing indicator animation */
   .typing-dot {
-    @apply w-2 h-2 bg-accent rounded-full;
+    @apply w-2 h-2 bg-foreground/60 rounded-full;
     animation: typingBounce 1.4s infinite ease-in-out both;
   }
   .typing-dot:nth-child(1) { animation-delay: -0.32s; }
@@ -81,7 +88,6 @@
     40% { transform: scale(1); opacity: 1; }
   }
 
-  /* Pulse ring for status indicators */
   .pulse-ring {
     @apply relative;
   }
@@ -91,19 +97,16 @@
     animation: pulseRing 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   }
   @keyframes pulseRing {
-    0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.4); }
-    70% { box-shadow: 0 0 0 8px rgba(255, 255, 255, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+    0% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0.1); }
+    70% { box-shadow: 0 0 0 8px rgba(0, 0, 0, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
   }
 }
 
 @layer utilities {
-  /* Text gradient utility */
   .text-gradient {
-    @apply bg-clip-text text-transparent bg-gradient-to-r from-accent-400 to-accent-200;
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary to-primary/70;
   }
-
-  /* Smooth transitions */
   .transition-default {
     @apply transition-all duration-200 ease-out;
   }
