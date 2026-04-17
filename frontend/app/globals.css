@@ -1,0 +1,110 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =========================================================================
+   KOCH AI — Global Styles
+   Enterprise dark theme with industrial aesthetic
+   ========================================================================= */
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-surface text-koch-100 font-sans antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* Scrollbar styling for the dark theme */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-surface;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-koch-700 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-koch-600;
+  }
+
+  /* Selection highlight */
+  ::selection {
+    @apply bg-accent/20 text-accent-100;
+  }
+}
+
+@layer components {
+  /* Glass-effect panels */
+  .glass-panel {
+    @apply bg-surface-elevated/80 backdrop-blur-xl border border-border rounded-xl;
+  }
+
+  /* Subtle glow effect for active/focused elements */
+  .glow-accent {
+    box-shadow: 0 0 20px rgba(255, 255, 255, 0.1),
+                0 0 60px rgba(255, 255, 255, 0.05);
+  }
+
+  /* Message bubble base styles */
+  .message-user {
+    @apply bg-accent/10 border border-accent/20 rounded-2xl rounded-br-md;
+  }
+
+  .message-ai {
+    @apply bg-surface-elevated border border-border rounded-2xl rounded-bl-md;
+  }
+
+  /* Typing indicator animation */
+  .typing-dot {
+    @apply w-2 h-2 bg-accent rounded-full;
+    animation: typingBounce 1.4s infinite ease-in-out both;
+  }
+  .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+  .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+  .typing-dot:nth-child(3) { animation-delay: 0s; }
+
+  @keyframes typingBounce {
+    0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+    40% { transform: scale(1); opacity: 1; }
+  }
+
+  /* Pulse ring for status indicators */
+  .pulse-ring {
+    @apply relative;
+  }
+  .pulse-ring::after {
+    content: '';
+    @apply absolute inset-0 rounded-full;
+    animation: pulseRing 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  @keyframes pulseRing {
+    0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.4); }
+    70% { box-shadow: 0 0 0 8px rgba(255, 255, 255, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+  }
+}
+
+@layer utilities {
+  /* Text gradient utility */
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-accent-400 to-accent-200;
+  }
+
+  /* Smooth transitions */
+  .transition-default {
+    @apply transition-all duration-200 ease-out;
+  }
+}

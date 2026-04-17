@@ -1,0 +1,24 @@
+# =============================================================================
+# KOCH AI — Worker Dependencies
+# =============================================================================
+# Core framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# Document parsing
+docling==2.15.0
+
+# HTTP client for Hindsight communication
+httpx==0.28.1
+
+# OpenAI client (for VLM extraction via vLLM)
+openai==1.58.1
+
+# Image handling
+Pillow==11.1.0
+
+# Data handling
+pydantic==2.10.4
+
+# Logging
+structlog==24.4.0

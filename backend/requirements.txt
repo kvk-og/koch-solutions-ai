@@ -1,0 +1,28 @@
+# =============================================================================
+# KOCH AI — Backend Dependencies
+# =============================================================================
+# Core API framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# OpenAI-compatible client (used to talk to vLLM)
+openai==1.58.1
+
+# HTTP client for service-to-service communication
+httpx==0.28.1
+
+# File upload handling
+python-multipart==0.0.18
+
+# Environment variable management
+python-dotenv==1.0.1
+
+# Data validation
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Streaming response support
+sse-starlette==2.2.1
+
+# Logging
+structlog==24.4.0

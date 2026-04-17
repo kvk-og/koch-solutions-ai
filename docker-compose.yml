@@ -1,0 +1,190 @@
+# =============================================================================
+# KOCH AI — Air-Gapped Engineering Intelligence Platform
+# Docker Compose Orchestration
+# =============================================================================
+# All services run on an isolated internal network. No external egress required.
+# GPU passthrough is mandatory for the vLLM inference engine.
+#
+# Usage:
+#   cp .env.example .env       # Configure secrets & model path
+#   docker compose up --build  # Build and launch the full stack
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Shared internal network — all inter-service traffic stays on-premise
+# ---------------------------------------------------------------------------
+networks:
+  koch-internal:
+    driver: bridge
+    name: koch-internal
+
+# ---------------------------------------------------------------------------
+# Persistent volumes
+# ---------------------------------------------------------------------------
+volumes:
+  hindsight-data:
+    driver: local
+  model-cache:
+    driver: local
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+services:
+  # =========================================================================
+  # 1. LLM Proxy — Bypass Cloudflare WAF block on OpenAI SDK default User-Agent
+  # =========================================================================
+  llm-proxy:
+    image: nginx:alpine
+    container_name: llm-proxy
+    restart: unless-stopped
+    networks:
+      - koch-internal
+    volumes:
+      - ./llm-proxy.conf:/etc/nginx/nginx.conf:ro
+
+
+  # =========================================================================
+  # 2. Hindsight — Temporal Memory Graph (Vector + Entity Storage)
+  # =========================================================================
+  hindsight:
+    image: ghcr.io/vectorize-io/hindsight:latest
+    container_name: koch-hindsight
+    restart: unless-stopped
+    networks:
+      - koch-internal
+    ports:
+      - "${HINDSIGHT_PORT:-8100}:8888"
+    environment:
+      - HINDSIGHT_API_KEY=${HINDSIGHT_API_KEY:-koch-hindsight-key}
+      - HINDSIGHT_STORAGE_DIR=/data
+      - HINDSIGHT_API_LLM_API_KEY=${VLLM_API_KEY}
+      - HINDSIGHT_API_LLM_BASE_URL=${VLLM_BASE_URL}
+      - HINDSIGHT_API_LLM_MODEL=${LLM_MODEL}
+    volumes:
+      - hindsight-data:/data   # Persist memory graph across restarts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # =========================================================================
+  # 3. Backend API — FastAPI Orchestrator
+  # =========================================================================
+  backend-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: koch-backend
+    restart: unless-stopped
+    networks:
+      - koch-internal
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      # Service discovery — containers resolve each other by service name
+      - HINDSIGHT_BASE_URL=http://hindsight:8888
+      - WORKER_BASE_URL=http://parser-workers:9000
+    depends_on:
+      hindsight:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app                 # Hot-reload in development
+      - /app/__pycache__               # Exclude bytecode cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # =========================================================================
+  # 4. Frontend — Next.js (App Router + Tailwind + TypeScript)
+  # =========================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: koch-frontend
+    restart: unless-stopped
+    networks:
+      - koch-internal
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:${BACKEND_PORT:-8000}
+    depends_on:
+      backend-api:
+        condition: service_healthy
+
+  # =========================================================================
+  # 5. Parser Workers — Document Ingestion Pipeline (Docling + VLM)
+  # =========================================================================
+  parser-workers:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    container_name: koch-workers
+    restart: unless-stopped
+    networks:
+      - koch-internal
+    ports:
+      - "${WORKER_PORT:-9000}:9000"
+    env_file:
+      - .env
+    environment:
+      - HINDSIGHT_BASE_URL=http://hindsight:8888
+    depends_on:
+      hindsight:
+        condition: service_healthy
+    volumes:
+      - ./workers:/app
+      - /app/__pycache__
+
+  # =========================================================================
+  # 6. CAD Parser Workers — Autodesk Inventor Ingestion Pipeline
+  # =========================================================================
+  cad-workers:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    container_name: koch-cad-workers
+    restart: unless-stopped
+    command: ["uvicorn", "cad_processor:app", "--host", "0.0.0.0", "--port", "9001", "--reload"]
+    networks:
+      - koch-internal
+    ports:
+      - "9001:9001"
+    env_file:
+      - .env
+    environment:
+      - HINDSIGHT_BASE_URL=http://hindsight:8888
+    depends_on:
+      hindsight:
+        condition: service_healthy
+    volumes:
+      - ./workers:/app
+      - /app/__pycache__
+
+  # =========================================================================
+  # 7. Telegram Bot — Mobile Field Assistant
+  # =========================================================================
+  telegram-bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    container_name: koch-telegram-bot
+    restart: unless-stopped
+    networks:
+      - koch-internal
+    env_file:
+      - .env
+    environment:
+      - BACKEND_API_URL=http://backend-api:8000
+    depends_on:
+      backend-api:
+        condition: service_healthy
