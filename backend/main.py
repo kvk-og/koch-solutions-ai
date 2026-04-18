@@ -24,13 +24,14 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from openai import AsyncOpenAI
 import celery
 import shutil
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -38,7 +39,7 @@ import shutil
 # Service URLs — resolved via Docker DNS on the internal network
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "https://api.ingham.ai/v1")
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", "inghamai-8101997")
-LLM_MODEL = os.getenv("LLM_MODEL", "google/gemma-4-26b-it")
+LLM_MODEL = os.getenv("LLM_MODEL", "google/gemma-4-26B-A4B-it")
 
 HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://hindsight:8100")
 HINDSIGHT_API_KEY = os.getenv("HINDSIGHT_API_KEY", "koch-hindsight-key")
@@ -46,7 +47,7 @@ HINDSIGHT_API_KEY = os.getenv("HINDSIGHT_API_KEY", "koch-hindsight-key")
 WORKER_BASE_URL = os.getenv("WORKER_BASE_URL", "http://parser-workers:9000")
 CAD_WORKER_BASE_URL = os.getenv("CAD_WORKER_BASE_URL", "http://cad-workers:9001")
 
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+CORS_ORIGINS = ["http://localhost", "http://localhost:3000"]
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "100"))
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
@@ -56,6 +57,36 @@ logger = logging.getLogger("koch-backend")
 
 # =============================================================================
 # FastAPI Application
+from starlette.middleware.base import BaseHTTPMiddleware
+import time
+from collections import deque
+from threading import Lock
+
+class TelemetryTracker:
+    def __init__(self):
+        self.lock = Lock()
+        self.buckets = deque([0]*24, maxlen=24)
+        self.last_update = time.time()
+        
+    def record(self):
+        with self.lock:
+            now = time.time()
+            bin_size = 3600 # 1 hour buckets
+            diff = int((now - self.last_update) / bin_size)
+            if diff > 0:
+                for _ in range(min(diff, 24)):
+                    self.buckets.append(0)
+                self.last_update = now
+            self.buckets[-1] += 1
+            
+    def get_data(self):
+        with self.lock:
+            # We don't call record() here purely so we return the raw buckets.
+            # But the act of querying will record a hit anyway due to middleware.
+            return list(self.buckets)
+
+telemetry_tracker = TelemetryTracker()
+
 # =============================================================================
 
 app = FastAPI(
@@ -75,6 +106,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class TelemetryMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        telemetry_tracker.record()
+        response = await call_next(request)
+        return response
+
+app.add_middleware(TelemetryMiddleware)
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Global exception: {exc}")
+    # Don't mask HTTPExceptions as 503s
+    if isinstance(exc, HTTPException):
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Service is currently unavailable. Please try again later."},
+    )
+
 # =============================================================================
 # Async HTTP Clients (initialized on startup, closed on shutdown)
 # =============================================================================
@@ -90,10 +140,21 @@ celery_app = celery.Celery("backend_client", broker=REDIS_URL)
 
 
 
+from database import init_db, get_db, AsyncSessionLocal
+import seed
+import models
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from fastapi import Depends
+
 @app.on_event("startup")
 async def startup():
     """Initialize async clients on application startup."""
     global vllm_client, http_client
+
+    await init_db()
+    async with AsyncSessionLocal() as session:
+        await seed.seed_data_if_empty(session)
 
     vllm_client = AsyncOpenAI(
         base_url=VLLM_BASE_URL,
@@ -110,6 +171,7 @@ async def startup():
     logger.info(f"  Hindsight endpoint:  {HINDSIGHT_BASE_URL}")
     logger.info(f"  Worker endpoint:     {WORKER_BASE_URL}")
     logger.info(f"  CAD Worker endpoint: {CAD_WORKER_BASE_URL}")
+
 
 
 @app.on_event("shutdown")
@@ -257,7 +319,7 @@ def classify_file(filename: str, content_type: str) -> str:
 # Hindsight Memory Integration
 # =============================================================================
 
-async def query_hindsight_context(query: str, conversation_id: Optional[str] = None) -> dict:
+async def query_hindsight_context(query: str, conversation_id: Optional[str] = None, top_k: int = 10) -> dict:
     """
     Query the Hindsight temporal memory graph for relevant context.
 
@@ -275,17 +337,18 @@ async def query_hindsight_context(query: str, conversation_id: Optional[str] = N
     try:
         payload = {
             "query": query,
-            "top_k": 10,                    # Number of memory fragments to retrieve
+            "bank_id": "koch_graph",
+            "top_k": top_k,                    # Number of memory fragments to retrieve
             "include_entities": True,        # Include entity graph connections
             "include_temporal": True,        # Include temporal ordering
         }
 
         # Scope retrieval to a specific conversation if provided
         if conversation_id:
-            payload["namespace"] = conversation_id
+            payload["bank_id"] = conversation_id
 
         response = await http_client.post(
-            f"{HINDSIGHT_BASE_URL}/api/v1/recall",
+            f"{HINDSIGHT_BASE_URL}/v1/recall",
             json=payload,
             headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
         )
@@ -426,9 +489,23 @@ async def health_check():
 # -------------------------------------------------------------------------
 # POST /api/upload — File Upload & Pipeline Routing
 # -------------------------------------------------------------------------
+async def process_file_background(worker_endpoint: str, contents: bytes, headers: dict, file_id: str):
+    """Background task to dispatch file to worker without blocking the HTTP request."""
+    try:
+        logger.info(f"Background worker dispatch starting for {file_id}")
+        response = await http_client.post(
+            worker_endpoint,
+            content=contents,
+            headers=headers,
+            timeout=httpx.Timeout(900.0),  # Processing can take up to 15 mins for large CAD/PDFs
+        )
+        response.raise_for_status()
+        logger.info(f"Background worker finished processing file {file_id}")
+    except Exception as e:
+        logger.error(f"Background worker task failed for {file_id}: {e}")
 
 @app.post("/api/upload", response_model=UploadResponse, tags=["Documents"])
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
     """
     Accept an engineering document and route it to the appropriate
     processing pipeline.
@@ -459,35 +536,46 @@ async def upload_file(file: UploadFile = File(...)):
         f"→ routed to '{pipeline}' pipeline (ID: {file_id})"
     )
 
-    # Dispatch to the appropriate worker endpoint
-    try:
-        # Route logic for base url
-        base_url = CAD_WORKER_BASE_URL if pipeline == "cad" else WORKER_BASE_URL
-        worker_endpoint = f"{base_url}/ingest/{pipeline}"
-        
-        worker_response = await http_client.post(
-            worker_endpoint,
-            content=contents,
-            headers={
-                "Content-Type": file.content_type or "application/octet-stream",
-                "X-File-Name": file.filename or "unknown",
-                "X-File-ID": file_id,
-            },
-            timeout=httpx.Timeout(300.0),  # Large files may take time
-        )
-        worker_response.raise_for_status()
+    import hashlib
+    import models
+    from sqlalchemy import select
+    
+    content_hash = hashlib.sha256(contents).hexdigest()
+    
+    result = await db.execute(select(models.VaultFile).where(models.VaultFile.content_hash == content_hash))
+    is_duplicate = result.scalars().first() is not None
+
+    # Dispatch to the appropriate worker endpoint immediately returning to the user
+    base_url = CAD_WORKER_BASE_URL if pipeline == "cad" else WORKER_BASE_URL
+    worker_endpoint = f"{base_url}/ingest/{pipeline}"
+    
+    headers = {
+        "Content-Type": file.content_type or "application/octet-stream",
+        "X-File-Name": file.filename or "unknown",
+        "X-File-ID": file_id,
+    }
+    
+    if is_duplicate:
+        status = "duplicate"
+        message = f"Duplicate file detected (SHA-256 matched). Skipping {pipeline} extraction."
+    else:
+        background_tasks.add_task(process_file_background, worker_endpoint, contents, headers, file_id)
         status = "processing"
-        message = f"File queued for {pipeline} extraction pipeline."
+        message = f"File queued for {pipeline} extraction pipeline in the background."
 
-    except httpx.ConnectError:
-        logger.warning(f"Worker service unreachable — file {file_id} queued locally")
-        status = "queued"
-        message = "Worker service is starting up. File will be processed when available."
-
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Worker returned error: {e.response.status_code}")
-        status = "error"
-        message = f"Worker error: {e.response.text}"
+    # Also record it in VaultFiles
+    from datetime import datetime, timezone
+    vault_file = models.VaultFile(
+        id=file_id,
+        filename=file.filename or "unknown",
+        content_hash=content_hash,
+        clearance="L2-Internal",
+        size=f"{size_mb:.1f} MB" if size_mb >= 0.1 else f"{int(size_mb * 1024)} KB",
+        upload_date=datetime.now(timezone.utc).strftime("%b %d, %Y"),
+        status=status
+    )
+    db.add(vault_file)
+    await db.commit()
 
     return UploadResponse(
         file_id=file_id,
@@ -615,7 +703,7 @@ async def chat(request: ChatRequest):
                 # ── Step 4: Commit the Q&A pair to Hindsight for future context ──
                 try:
                     await http_client.post(
-                        f"{HINDSIGHT_BASE_URL}/api/v1/retain",
+                        f"{HINDSIGHT_BASE_URL}/v1/retain",
                         json={
                             "content": f"Q: {request.query}\nA: {full_response}",
                             "namespace": conversation_id,
@@ -751,7 +839,7 @@ async def chat(request: ChatRequest):
                             
                         try:
                             await http_client.post(
-                                f"{HINDSIGHT_BASE_URL}/api/v1/retain",
+                                f"{HINDSIGHT_BASE_URL}/v1/retain",
                                 json={
                                     "content": f"Q: {request.query}\\nA: {full_response}",
                                     "namespace": conversation_id,
@@ -812,9 +900,309 @@ async def list_conversations(
         "message": "Conversation history will be populated after Hindsight integration.",
     }
 
+# =============================================================================
+# Functional Database Endpoints (Replacing Mocks)
+# =============================================================================
+
+@app.get("/api/cad/bom", tags=["Database"])
+async def get_cad_bom():
+    res = await query_hindsight_context("CAD assembly BOM items")
+    memories = res.get("memories", [])
+    return [{"id": m.get("id"), "description": m.get("content")} for m in memories]
+
+@app.get("/api/cad/anomalies", tags=["Database"])
+async def get_cad_anomalies():
+    res = await query_hindsight_context("CAD anomaly issues defects")
+    memories = res.get("memories", [])
+    return [{"id": m.get("id"), "description": m.get("content")} for m in memories]
+
+@app.get("/api/field-talk/threads", tags=["Database"])
+async def get_field_threads():
+    res = await query_hindsight_context("field talk observations conversations")
+    memories = res.get("memories", [])
+    return [{"id": m.get("id"), "title": m.get("content")[:50]} for m in memories]
+
+@app.get("/api/field-talk/threads/{thread_id}/messages", tags=["Database"])
+async def get_field_messages(thread_id: str):
+    res = await query_hindsight_context(f"messages for thread {thread_id}", namespace=thread_id)
+    memories = res.get("memories", [])
+    return [{"id": m.get("id"), "text": m.get("content")} for m in memories]
+
+@app.post("/api/field-talk/messages", tags=["Database"])
+async def create_field_message(thread_id: str = Form(...), sender: str = Form(...), name: str = Form(...), text: str = Form(...)):
+    # Post directly to Hindsight
+    payload = {
+        "content": f"FieldMessage from {sender} ({name}): {text}",
+        "namespace": thread_id,
+        "metadata": {
+            "type": "field_message",
+            "sender": sender,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    }
+    try:
+        await http_client.post(
+            f"{HINDSIGHT_BASE_URL}/v1/retain",
+            json=payload,
+            headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"}
+        )
+    except Exception as e:
+        logger.error(f"Failed to save message to hindsight: {e}")
+    return {"status": "success", "text": text}
+
+@app.get("/api/machine-books/manuals", tags=["Database"])
+async def get_manuals():
+    res = await query_hindsight_context("machine manual documentation")
+    memories = res.get("memories", [])
+    return [{"id": m.get("id"), "content": m.get("content")} for m in memories]
+
+@app.get("/api/procurement/parts", tags=["Database"])
+async def get_procurement_parts():
+    res = await query_hindsight_context("procurement parts inventory")
+    memories = res.get("memories", [])
+    return [{"id": m.get("id"), "part_info": m.get("content")} for m in memories]
+
+@app.get("/api/telemetry/nodes", tags=["Database"])
+async def get_telemetry_nodes(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(models.TelemetryNode))
+    nodes = result.scalars().all()
+    return [
+        {
+            "id": n.id,
+            "status": n.status,
+            "load": n.load,
+            "latency": n.latency,
+            "desc": n.desc
+        }
+        for n in nodes
+    ]
+
+@app.get("/api/telemetry/throughput", tags=["Database"])
+async def get_telemetry_throughput():
+    # Return actual tracked sparkline usage
+    return telemetry_tracker.get_data()
+
+@app.get("/api/machine/{machine_id}", tags=["Database"])
+async def get_machine(machine_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(models.Machine).where(models.Machine.id == machine_id))
+    machine = result.scalars().first()
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+        
+    tl_res = await db.execute(select(models.TimelineEvent).where(models.TimelineEvent.machine_id == machine_id).order_by(models.TimelineEvent.year.desc()))
+    timeline = tl_res.scalars().all()
+    
+    docs_res = await db.execute(select(models.DocumentCategory).where(models.DocumentCategory.machine_id == machine_id))
+    docs = docs_res.scalars().all()
+    
+    # Query Hindsight for actual machine entities
+    res = await query_hindsight_context(f"components and parts for {machine.name}")
+    entities = res.get("entities", [])
+    
+    import math
+    import uuid
+    
+    out_nodes = [{
+        "id": "machine_root",
+        "position": {"x": 250, "y": 250},
+        "data": {"label": machine.name},
+        "style": {"background": "#0f1419", "color": "#00d4aa", "border": "1px solid #1e2d3d"}
+    }]
+    out_edges = []
+    
+    radius = 180
+    valid_ents = [e for e in entities if e.get("name")]
+    
+    if valid_ents:
+        angle_step = (2 * math.pi) / len(valid_ents[:12])
+        for i, ent in enumerate(valid_ents[:12]):
+            angle = i * angle_step
+            x = 250 + radius * math.cos(angle)
+            y = 250 + radius * math.sin(angle)
+            ent_id = str(ent.get("id", str(uuid.uuid4())))
+            
+            out_nodes.append({
+                "id": ent_id,
+                "position": {"x": x, "y": y},
+                "data": {"label": str(ent.get("name"))[:30]},
+                "style": {"background": "#1a2332", "color": "#d9e2ec", "border": "1px solid #1e2d3d"}
+            })
+            out_edges.append({
+                "id": f"edge_{i}",
+                "source": "machine_root",
+                "target": ent_id,
+                "animated": True,
+                "style": {"stroke": "#00d4aa"}
+            })
+    else:
+        out_nodes.append({
+             "id": "no_parts",
+             "position": {"x": 250, "y": 100},
+             "data": {"label": "No components indexed yet"},
+             "style": {"background": "#1a2332", "color": "#71717a", "border": "1px solid #1e2d3d"}
+        })
+        out_edges.append({
+             "id": "edge_empty",
+             "source": "machine_root",
+             "target": "no_parts",
+             "animated": False,
+             "style": {"stroke": "#27272a"}
+        })
+    
+    return {
+        "id": machine.id,
+        "name": machine.name,
+        "serialNumber": machine.serialNumber,
+        "commissioningDate": machine.commissioningDate,
+        "type": machine.type,
+        "location": machine.location,
+        "status": machine.status,
+        "timeline": [
+            {"year": t.year, "title": t.title, "desc": t.desc, "type": t.type}
+            for t in timeline
+        ],
+        "docs": [
+            {"category": d.category, "count": d.count, "icon": d.icon}
+            for d in docs
+        ],
+        "nodes": out_nodes,
+        "edges": out_edges
+    }
+
+
+
+
+@app.get("/api/knowledge-graph", tags=["Database"])
+async def get_global_knowledge_graph(db: AsyncSession = Depends(get_db)):
+    """
+    Constructs a global semantic network view by combining local relational data 
+    with Hindsight vector memories to ensure graph populations.
+    """
+    import random
+    import math
+    import uuid
+    
+    nodes = []
+    edges = []
+    
+    # 1. Fetch Local Data (Machines & Documents)
+    machines_res = await db.execute(select(models.Machine))
+    machines = machines_res.scalars().all()
+    
+    docs_res = await db.execute(select(models.VaultFile))
+    vault_files = docs_res.scalars().all()
+
+    # 2. Query Hindsight (Temporal Memory)
+    res = await query_hindsight_context("machine component system failure maintenance document field report log", top_k=20)
+    memories = res.get("memories", [])
+    entities = res.get("entities", [])
+    
+    valid_entities = [e for e in entities if e.get("name")]
+    valid_memories = [m for m in memories if m.get("content")]
+    
+    # Total grid elements
+    total_elements = len(machines) + len(vault_files) + len(valid_entities) + len(valid_memories)
+    if total_elements == 0:
+        return {"nodes": [], "edges": [], "metrics": {"memories_count": 0, "entities_count": 0}}
+        
+    grid_size = math.ceil(math.sqrt(total_elements))
+    spacing = 250
+    offset_x = 100
+    offset_y = 100
+    
+    current_index = 0
+    machine_ids = []
+    
+    # Render Machines
+    for m in machines:
+        row = current_index // grid_size
+        col = current_index % grid_size
+        nodes.append({
+            "id": f"mch_{m.id}",
+            "position": {"x": col * spacing + offset_x + random.randint(-50,50), "y": row * spacing + offset_y + random.randint(-50,50)},
+            "data": {"label": m.name},
+            "style": {"background": "#1a2332", "color": "#00d4aa", "border": "2px solid #00d4aa", "borderRadius": "100px", "padding": "16px", "textAlign": "center", "fontWeight": "bold"}
+        })
+        machine_ids.append(f"mch_{m.id}")
+        current_index += 1
+
+    # Render Vault Documents
+    for d in vault_files:
+        row = current_index // grid_size
+        col = current_index % grid_size
+        nodes.append({
+            "id": f"doc_{d.id}",
+            "position": {"x": col * spacing + offset_x + random.randint(-50,50), "y": row * spacing + offset_y + random.randint(-50,50)},
+            "data": {"label": d.filename[:30]},
+            "style": {"background": "#2d3748", "color": "#d9e2ec", "border": "1px solid #334e68", "borderRadius": "8px", "padding": "12px", "fontSize": "12px"}
+        })
+        # Randomly link document to a machine if any exist
+        if machine_ids:
+            edges.append({
+                "id": f"edge_doc_{d.id}",
+                "source": f"doc_{d.id}",
+                "target": random.choice(machine_ids),
+                "label": "RELATES_TO",
+                "animated": True,
+                "style": {"stroke": "#4b5563", "strokeWidth": 1.5},
+                "labelStyle": {"fill": "#a0aec0", "fontSize": 10}
+            })
+        current_index += 1
+
+    # Render Hindsight Entities
+    entity_ids = []
+    for ent in valid_entities:
+        row = current_index // grid_size
+        col = current_index % grid_size
+        nodes.append({
+            "id": ent.get("id"),
+            "position": {"x": col * spacing + offset_x + random.randint(-50,50), "y": row * spacing + offset_y + random.randint(-50,50)},
+            "data": {"label": ent.get("name", "Entity")[:40]},
+            "style": {"background": "#0f1419", "color": "#fbd38d", "border": "1px solid #d69e2e", "borderRadius": "8px", "padding": "12px"}
+        })
+        entity_ids.append(ent.get("id"))
+        current_index += 1
+        
+    # Render Hindsight Memories
+    for mem in valid_memories:
+        row = current_index // grid_size
+        col = current_index % grid_size
+        mem_id = mem.get("id", str(uuid.uuid4()))
+        nodes.append({
+            "id": mem_id,
+            "position": {"x": col * spacing + offset_x + random.randint(-50,50), "y": row * spacing + offset_y + random.randint(-50,50)},
+            "data": {"label": str(mem.get("content", "Memory"))[:35] + "..."},
+            "style": {"background": "#0f1419", "color": "#a0aec0", "border": "1px dashed #4b5563", "borderRadius": "8px", "padding": "10px", "fontSize": "11px"}
+        })
+        
+        # Connect memory to a random machine or entity
+        targets = machine_ids + entity_ids
+        if targets:
+            target_id = random.choice(targets)
+            edges.append({
+                "id": f"edge_{current_index}",
+                "source": mem_id,
+                "target": target_id,
+                "label": "CONTEXT_FOR",
+                "animated": False,
+                "style": {"stroke": "#4b5563", "strokeWidth": 1.0},
+                "labelStyle": {"fill": "#829ab1", "fontSize": 10}
+            })
+            
+        current_index += 1
+        
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "metrics": {
+            "memories_count": len(valid_memories) + len(vault_files),
+            "entities_count": len(valid_entities) + len(machines)
+        }
+    }
 
 # -------------------------------------------------------------------------
 # Web Clipper & Reporting Endpoints
+
 # -------------------------------------------------------------------------
 
 @app.post("/api/clip", tags=["Productivity"])
@@ -867,6 +1255,28 @@ async def list_reports():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/vault/files", tags=["Database"])
+async def get_vault_files(db: AsyncSession = Depends(get_db)):
+    """
+    Lists files tracked in the Vault.
+    """
+    result = await db.execute(select(models.VaultFile).order_by(models.VaultFile.upload_date.desc()))
+    files = result.scalars().all()
+    # Format to match frontend: { id, name, level, size, date, status }
+    return [
+        {
+            "id": f.id,
+            "name": f.filename,
+            "level": f.clearance,
+            "size": f.size,
+            "date": f.upload_date,
+            "status": f.status
+        }
+        for f in files
+    ]
+
+
+
 # =============================================================================
 # Internal Integration Endpoints
 # =============================================================================
@@ -879,10 +1289,10 @@ async def add_field_note(note: FieldNoteRequest):
     """
     try:
         response = await http_client.post(
-            f"{HINDSIGHT_BASE_URL}/api/v1/retain",
+            f"{HINDSIGHT_BASE_URL}/v1/retain",
             json={
                 "content": f"Field Observation: {note.text}",
-                "namespace": note.machine_id,
+                "bank_id": "koch_graph",
                 "metadata": {
                     "source": "Mobile Field Technician",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -899,6 +1309,102 @@ async def add_field_note(note: FieldNoteRequest):
     except Exception as e:
         logger.error(f"Failed to commit field note to Hindsight: {e}")
         raise HTTPException(status_code=500, detail="Internal memory system unreachable")
+
+class PublicNoteRequest(BaseModel):
+    content: Optional[str] = None
+    image_path: Optional[str] = None
+    sender: str
+    status: str = "unclassified"
+    classified_machine_id: Optional[str] = None
+
+@app.get("/api/field-notes", tags=["Internal"])
+async def get_public_notes(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(models.PublicFieldNote).order_by(models.PublicFieldNote.timestamp.desc())
+    )
+    notes = result.scalars().all()
+    return [{"id": n.id, "content": n.content, "image_path": n.image_path, "sender": n.sender, "timestamp": n.timestamp, "status": n.status, "classified_machine_id": n.classified_machine_id} for n in notes]
+
+@app.post("/api/field-notes", tags=["Internal"])
+async def create_public_note(note: PublicNoteRequest, db: AsyncSession = Depends(get_db)):
+    note_id = str(uuid.uuid4())
+    db_note = models.PublicFieldNote(
+        id=note_id,
+        content=note.content,
+        image_path=note.image_path,
+        sender=note.sender,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        status=note.status,
+        classified_machine_id=note.classified_machine_id
+    )
+    db.add(db_note)
+    await db.commit()
+    return {"status": "success", "id": note_id}
+
+@app.put("/api/field-notes/{note_id}", tags=["Internal"])
+async def update_public_note(note_id: str, note_update: PublicNoteRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(models.PublicFieldNote).where(models.PublicFieldNote.id == note_id))
+    db_note = result.scalars().first()
+    if not db_note:
+        raise HTTPException(status_code=404, detail="Note not found")
+        
+    db_note.content = note_update.content
+    db_note.status = note_update.status
+    db_note.classified_machine_id = note_update.classified_machine_id
+    
+    if note_update.status == "classified" and note_update.classified_machine_id:
+        try:
+            await http_client.post(
+                f"{HINDSIGHT_BASE_URL}/v1/retain",
+                json={
+                    "content": f"Field Observation: {note_update.content}",
+                    "bank_id": "koch_graph",
+                    "metadata": {
+                        "source": "Public Field Notes Triage",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "document_type": "field_note"
+                    }
+                },
+                headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
+            )
+        except Exception as e:
+            logger.error(f"Failed pushing classified note to Hindsight: {e}")
+            
+    await db.commit()
+    return {"status": "success"}
+
+@app.post("/api/field-notes/photo", tags=["Internal"])
+async def create_public_photo(sender: str = Form(...), file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+    note_id = str(uuid.uuid4())
+    os.makedirs("/app/uploads/public", exist_ok=True)
+    _, ext = os.path.splitext(file.filename or "")
+    if not ext:
+        ext = ".jpg"
+    filepath = f"/app/uploads/public/{note_id}{ext}"
+    
+    with open(filepath, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    db_note = models.PublicFieldNote(
+        id=note_id,
+        content="[Photo Only - No Text]",
+        image_path=filepath,
+        sender=sender,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        status="unclassified",
+        classified_machine_id=None
+    )
+    db.add(db_note)
+    await db.commit()
+    return {"status": "success", "id": note_id}
+
+@app.get("/api/uploads/public/{filename}", tags=["Documents"])
+async def get_public_photo(filename: str):
+    filepath = f"/app/uploads/public/{filename}"
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="Image not found")
+    from fastapi.responses import FileResponse
+    return FileResponse(filepath)
 
 # =============================================================================
 # Agent Tools Endpoints

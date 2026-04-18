@@ -7,61 +7,31 @@ import "reactflow/dist/style.css";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../../components/ui/tabs";
 import CadViewer from "../../components/CadViewer";
 
-// Mock entity data to pull in case of no API
-const mockMachineData = {
-  id: "MCH-001",
-  name: "Thyssenkrupp Stacker-Reclaimer #04",
-  serialNumber: "TK-SR-04-1998",
-  commissioningDate: "1998-10-15",
-  type: "Material Handling",
-  location: "Zone A, Port Headland",
-  status: "Operational",
-};
-
-// Mock Timeline
-const timelineEvents = [
-  { year: "2024", title: "Routine Maintenance Log", desc: "Replaced primary conveyor belt drive bearings.", type: "Maintenance" },
-  { year: "2020", title: "Structural Audit", desc: "Passed 20-year structural integrity scan.", type: "Safety" },
-  { year: "2015", title: "Drive Motor Upgrade Specs", desc: "Upgraded main boom motor from 250kW to 300kW.", type: "Upgrade" },
-  { year: "1998", title: "Original Construction Docs", desc: "Commissioning blueprints and P&IDs.", type: "Construction" },
-];
-
-// Mock Docs Grid
-const documentCategories = [
-  { category: "Schematics & P&IDs", count: 12, icon: "M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" },
-  { category: "Maintenance Manuals", count: 8, icon: "M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" },
-  { category: "Safety Bulletins", count: 4, icon: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" },
-  { category: "IoT Sensor Logs", count: 154, icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" },
-];
-
-// Graph Configuration
-const initialNodes = [
-  { id: 'm', position: { x: 250, y: 50 }, data: { label: 'Stacker-Reclaimer #04' }, style: { background: '#0f1419', color: '#00d4aa', border: '1px solid #1e2d3d' } },
-  { id: 'p1', position: { x: 100, y: 150 }, data: { label: 'Main Boom Motor' }, style: { background: '#1a2332', color: '#d9e2ec', border: '1px solid #1e2d3d' } },
-  { id: 'p2', position: { x: 400, y: 150 }, data: { label: 'Conveyor Drive System' }, style: { background: '#1a2332', color: '#d9e2ec', border: '1px solid #1e2d3d' } },
-  { id: 'p3', position: { x: 250, y: 250 }, data: { label: 'Slewing Bearing' }, style: { background: '#1a2332', color: '#d9e2ec', border: '1px solid #1e2d3d' } },
-];
-const initialEdges: Edge[] = [
-  { id: 'e1', source: 'm', target: 'p1', animated: true, style: { stroke: '#00d4aa' } },
-  { id: 'e2', source: 'm', target: 'p2', animated: true, style: { stroke: '#00d4aa' } },
-  { id: 'e3', source: 'm', target: 'p3', animated: true, style: { stroke: '#00d4aa' } },
-];
+// State managed internally via API payload
 
 export default function MachineDashboard({ params }: { params: { id: string } }) {
-  const [machineData, setMachineData] = useState(mockMachineData);
+  const [machineData, setMachineData] = useState<any>(null);
+  const [timelineEvents, setTimelineEvents] = useState<any[]>([]);
+  const [documentCategories, setDocumentCategories] = useState<any[]>([]);
+  const [graphNodes, setGraphNodes] = useState<any[]>([]);
+  const [graphEdges, setGraphEdges] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Attempt to fetch from API stub, fallback to mock data on error/empty
+    // Attempt to fetch from API
     const fetchMachine = async () => {
       try {
         const response = await fetch(`/api/machine/${params.id}`);
         if (response.ok) {
           const data = await response.json();
           setMachineData(data);
+          if (data.timeline) setTimelineEvents(data.timeline);
+          if (data.docs) setDocumentCategories(data.docs);
+          if (data.nodes) setGraphNodes(data.nodes);
+          if (data.edges) setGraphEdges(data.edges);
         }
       } catch (error) {
-        console.error("Using mock data due to API failure:", error);
+        console.error("Using fallback due to API failure:", error);
       } finally {
         setIsLoading(false);
       }
@@ -69,7 +39,7 @@ export default function MachineDashboard({ params }: { params: { id: string } })
     fetchMachine();
   }, [params.id]);
 
-  if (isLoading) return <div className="h-full flex items-center justify-center text-muted-foreground">Loading Digital Passport...</div>;
+  if (isLoading || !machineData) return <div className="h-full flex items-center justify-center text-muted-foreground">Loading Digital Passport...</div>;
 
   return (
     <div className="flex flex-col h-full overflow-hidden bg-background">
@@ -153,8 +123,8 @@ export default function MachineDashboard({ params }: { params: { id: string } })
 
           <TabsContent value="graph" className="flex-1 min-h-[500px] border border-border rounded-xl overflow-hidden bg-background-overlay">
             <ReactFlow 
-              nodes={initialNodes} 
-              edges={initialEdges} 
+              nodes={graphNodes} 
+              edges={graphEdges} 
               fitView 
               attributionPosition="bottom-right"
             >

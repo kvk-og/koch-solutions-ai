@@ -46,7 +46,7 @@ HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://hindsight:8100")
 HINDSIGHT_API_KEY = os.getenv("HINDSIGHT_API_KEY", "koch-hindsight-key")
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "https://api.ingham.ai/v1")
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", "inghamai-8101997")
-LLM_MODEL = os.getenv("LLM_MODEL", "google/gemma-4-26b-it")
+LLM_MODEL = os.getenv("LLM_MODEL", "google/gemma-4-26B-A4B-it")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("koch-workers")
@@ -120,7 +120,7 @@ async def commit_to_hindsight(
     """
     payload = {
         "content": content,
-        "namespace": namespace,
+        "bank_id": "koch_graph",
         "metadata": {
             **metadata,
             "ingested_at": datetime.now(timezone.utc).isoformat(),
@@ -130,7 +130,7 @@ async def commit_to_hindsight(
 
     try:
         response = await http_client.post(
-            f"{HINDSIGHT_BASE_URL}/api/v1/retain",
+            f"{HINDSIGHT_BASE_URL}/v1/retain",
             json=payload,
             headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
         )
@@ -184,80 +184,42 @@ async def parse_with_docling(file_bytes: bytes, filename: str) -> list[dict]:
     """
     logger.info(f"[DOCLING] Parsing document: {filename} ({len(file_bytes)} bytes)")
 
-    # ── STUB: Simulated Docling output ──
-    # In production, replace with actual docling.DocumentConverter call
-    file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
-
-    # Simulate multi-section extraction
-    parsed_chunks = [
-        {
-            "content": (
-                f"[Parsed from {filename}]\n\n"
-                "Section 1: Equipment Specifications\n"
-                "This section contains equipment specifications extracted "
-                "by the Docling parser. In production, this would be the "
-                "actual text content from the uploaded document."
-            ),
-            "metadata": {
-                "source": filename,
-                "section": "Equipment Specifications",
-                "page_range": "1-5",
-                "document_type": "technical_manual",
-                "file_hash": file_hash,
-                "parser": "docling",
-                "entities_detected": ["equipment", "specifications"],
-            },
-        },
-        {
-            "content": (
-                f"[Parsed from {filename}]\n\n"
-                "Section 2: Operating Procedures\n"
-                "This section contains operating procedures and safety "
-                "guidelines extracted from the document."
-            ),
-            "metadata": {
-                "source": filename,
-                "section": "Operating Procedures",
-                "page_range": "6-12",
-                "document_type": "technical_manual",
-                "file_hash": file_hash,
-                "parser": "docling",
-                "entities_detected": ["procedures", "safety"],
-            },
-        },
-    ]
-
-    # ── PRODUCTION IMPLEMENTATION (uncomment when docling is available) ──
-    # from docling.document_converter import DocumentConverter
-    # from docling.datamodel.pipeline_options import PdfPipelineOptions
-    #
-    # # Write bytes to a temporary file for docling
-    # import tempfile
-    # with tempfile.NamedTemporaryFile(suffix=os.path.splitext(filename)[1], delete=False) as tmp:
-    #     tmp.write(file_bytes)
-    #     tmp_path = tmp.name
-    #
-    # try:
-    #     converter = DocumentConverter()
-    #     result = converter.convert(tmp_path)
-    #     doc = result.document
-    #
-    #     parsed_chunks = []
-    #     for i, element in enumerate(doc.iterate_items()):
-    #         chunk = {
-    #             "content": element.text,
-    #             "metadata": {
-    #                 "source": filename,
-    #                 "section": element.label if hasattr(element, 'label') else f"chunk_{i}",
-    #                 "page": element.prov[0].page_no if element.prov else None,
-    #                 "document_type": "parsed",
-    #                 "file_hash": file_hash,
-    #                 "parser": "docling",
-    #             },
-    #         }
-    #         parsed_chunks.append(chunk)
-    # finally:
-    #     os.unlink(tmp_path)
+    # ── PRODUCTION IMPLEMENTATION ──
+    from docling.document_converter import DocumentConverter
+    
+    # Write bytes to a temporary file for docling
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=os.path.splitext(filename)[1], delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+    
+    try:
+        converter = DocumentConverter()
+        result = converter.convert(tmp_path)
+        doc = result.document
+    
+        parsed_chunks = []
+        for i, element in enumerate(doc.iterate_items()):
+            chunk = {
+                "content": element.text,
+                "metadata": {
+                    "source": filename,
+                    "section": element.label if hasattr(element, 'label') else f"chunk_{i}",
+                    "page": element.prov[0].page_no if element.prov else None,
+                    "document_type": "parsed",
+                    "file_hash": file_hash,
+                    "parser": "docling",
+                },
+            }
+            parsed_chunks.append(chunk)
+    except Exception as e:
+        logger.error(f"[DOCLING] parsing failed for {filename}: {e}")
+        parsed_chunks = [{
+            "content": f"Failed to parse document {filename}",
+            "metadata": {"source": filename, "status": "error", "file_hash": file_hash, "parser": "docling"}
+        }]
+    finally:
+        os.unlink(tmp_path)
 
     logger.info(f"[DOCLING] Extracted {len(parsed_chunks)} chunks from {filename}")
     return parsed_chunks
@@ -294,69 +256,45 @@ async def extract_with_vlm(file_bytes: bytes, filename: str) -> list[dict]:
 
     file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
 
-    # ── STUB: Simulated VLM extraction ──
-    # In production, this would send the image to a multimodal LLM
+    # ── PRODUCTION IMPLEMENTATION ──
     try:
-        # For a multimodal model, you would encode the image as base64
-        # and send it in the messages array:
-        #
-        # import base64
-        # image_b64 = base64.b64encode(file_bytes).decode("utf-8")
-        #
-        # response = await vllm_client.chat.completions.create(
-        #     model=LLM_MODEL,
-        #     messages=[
-        #         {
-        #             "role": "system",
-        #             "content": (
-        #                 "You are an expert engineering document analyzer. "
-        #                 "Extract all equipment tags, specifications, connections, "
-        #                 "and annotations from this engineering diagram. "
-        #                 "Format your output as structured JSON."
-        #             ),
-        #         },
-        #         {
-        #             "role": "user",
-        #             "content": [
-        #                 {"type": "text", "text": f"Analyze this engineering diagram: {filename}"},
-        #                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
-        #             ],
-        #         },
-        #     ],
-        #     max_tokens=2048,
-        #     temperature=0.1,  # Low temperature for factual extraction
-        # )
-        #
-        # extracted_text = response.choices[0].message.content
-
-        # Simulated VLM output
-        extracted_text = (
-            f"[VLM Analysis of {filename}]\n\n"
-            "Equipment Identified:\n"
-            "- P-101: Centrifugal Pump, 500 GPM, 150 PSI discharge\n"
-            "- V-201: Pressure Vessel, 1000 gal capacity, 300 PSI MAWP\n"
-            "- HX-301: Shell & Tube Heat Exchanger, 2.5 MMBTU/hr\n\n"
-            "Connections:\n"
-            "- P-101 discharge → V-201 inlet (4\" SS316L)\n"
-            "- V-201 outlet → HX-301 shell side (6\" CS)\n\n"
-            "Instrumentation:\n"
-            "- PI-101: Pressure indicator on P-101 discharge\n"
-            "- FT-201: Flow transmitter on V-201 inlet\n"
-            "- TT-301: Temperature transmitter on HX-301 outlet"
+        import base64
+        image_b64 = base64.b64encode(file_bytes).decode("utf-8")
+        
+        response = await vllm_client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert engineering document analyzer. "
+                        "Extract all equipment tags, specifications, connections, "
+                        "and annotations from this engineering diagram. "
+                        "Format your output as structured text."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"Analyze this engineering diagram: {filename}"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                    ],
+                },
+            ],
+            max_tokens=2048,
+            temperature=0.1,  # Low temperature for factual extraction
         )
+        
+        extracted_text = response.choices[0].message.content
 
         extracted_chunks = [
             {
-                "content": extracted_text,
+                "content": f"[VLM Analysis of {filename}]\n\n{extracted_text}",
                 "metadata": {
                     "source": filename,
                     "document_type": "schematic",
                     "file_hash": file_hash,
                     "parser": "vlm",
-                    "entities_detected": [
-                        "P-101", "V-201", "HX-301",
-                        "PI-101", "FT-201", "TT-301",
-                    ],
                     "extraction_confidence": 0.85,
                 },
             },

@@ -83,7 +83,7 @@ async def commit_to_hindsight(
 
     try:
         response = await http_client.post(
-            f"{HINDSIGHT_BASE_URL}/api/v1/retain",
+            f"{HINDSIGHT_BASE_URL}/v1/retain",
             json=payload,
             headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
         )
@@ -112,56 +112,39 @@ async def process_cad_file(file_bytes: bytes, filename: str) -> list[dict]:
     
     file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
 
-    # STUB: Simulated Autodesk Inventor extraction
-    # Normally we would use a proprietary tool, Forge API, or other CAD extraction library to parse iProperties and the hierarchy.
-
-    mock_bom = {
-        "assembly": filename,
-        "properties": {
-            "Part Number": "ASM-8400",
-            "Material": "Steel/Aluminum/Various",
-            "Mass": "1450.5 kg"
-        },
-        "components": [
-            {
-                "Item": "1",
-                "Part Number": "BRG-6205",
-                "Description": "Deep Groove Ball Bearing",
-                "Quantity": 4,
-                "Material": "Stainless Steel"
-            },
-            {
-                "Item": "2",
-                "Part Number": "DRV-300kW",
-                "Description": "Main Drive Motor Assembly",
-                "Quantity": 1,
-                "Material": "Cast Iron/Copper"
-            },
-            {
-                "Item": "3",
-                "Part Number": "CVY-BLT-100",
-                "Description": "Main Conveyor Belt",
-                "Quantity": 1,
-                "Material": "Rubberized Polymer"
-            }
-        ]
-    }
-
-    # Format it as text for the LLM to easily understand when retrieved via Hindsight
-    bom_content = (
-        f"[CAD Model Extracted Data for {filename}]\n\n"
-        f"Assembly Properties:\n"
-        f"Part Number: {mock_bom['properties']['Part Number']}\n"
-        f"Material: {mock_bom['properties']['Material']}\n"
-        f"Mass: {mock_bom['properties']['Mass']}\n\n"
-        f"Bill of Materials (BOM):\n"
-    )
-    for comp in mock_bom["components"]:
-        bom_content += (
-            f"- [Item {comp['Item']}] {comp['Part Number']}: {comp['Description']} "
-            f"(Qty: {comp['Quantity']}, Material: {comp['Material']})\n"
-        )
+    # Binary String Heuristic Extraction for Proprietary OLE / CAD files
+    import re
+    # Find all sequences of 6 or more ASCII printable characters
+    ascii_strings = re.findall(b'[\x20-\x7E]{6,}', file_bytes)
+    extracted_strings = [s.decode('utf-8', errors='ignore') for s in ascii_strings]
+    
+    # Filter strings to those that might be metadata (alphanumeric with some structure like hyphens/underscores)
+    # This reduces heavy noise from raw binary blocks that just happen to be ascii
+    metadata_candidates = []
+    for s in extracted_strings:
+        # Ignore things that are pure spaces or too repetitive
+        s = s.strip()
+        if len(s) < 6 or s.count(' ') > len(s) / 2:
+            continue
+        metadata_candidates.append(s)
         
+    # Deduplicate while preserving order
+    seen = set()
+    unique_candidates = []
+    for s in metadata_candidates:
+        if s not in seen:
+            unique_candidates.append(s)
+            seen.add(s)
+
+    bom_content = f"[CAD Model Extracted Binary Data for {filename}]\n\n"
+    bom_content += "Discovered Prop/Text Data:\n"
+    
+    if unique_candidates:
+        for idx, candidate in enumerate(unique_candidates[:200]): # Limit to 200 items to avoid massive payloads
+            bom_content += f"- {candidate}\n"
+    else:
+        bom_content += "No readable strings found in binary.\n"
+
     extracted_chunks = [
         {
             "content": bom_content,
@@ -169,9 +152,9 @@ async def process_cad_file(file_bytes: bytes, filename: str) -> list[dict]:
                 "source": filename,
                 "document_type": "cad_assembly",
                 "file_hash": file_hash,
-                "parser": "cad",
-                "entities_detected": [comp["Part Number"] for comp in mock_bom['components']] + [mock_bom['properties']['Part Number']],
-                "glb_url": f"/mock-assets/{filename}.glb"
+                "parser": "cad_heuristic",
+                "entities_detected": [],
+                "glb_url": None # Cannot dynamically create .glb without translation engine
             },
         },
     ]

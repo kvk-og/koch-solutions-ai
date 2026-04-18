@@ -144,39 +144,74 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 @authorized_only
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     caption = update.message.caption or ""
+    sender = update.message.from_user.username or "Unknown"
     
     import re
     match = re.search(r"#([a-zA-Z0-9_-]+)", caption)
+    machine_id = None
     if match:
         machine_id = match.group(1)
     else:
         parts = caption.split()
         if parts:
             machine_id = parts[0]
-        else:
-            await update.message.reply_text("❌ Please provide a Machine ID in the caption (e.g. #Machine04).")
-            return
             
     photo_file = await update.message.photo[-1].get_file()
-    status_msg = await update.message.reply_text(f"📸 Uploading photo for `{machine_id}` to KOCH AI...", parse_mode="Markdown")
+    photo_bytes = await photo_file.download_as_bytearray()
     
+    if machine_id:
+        status_msg = await update.message.reply_text(f"📸 Uploading photo for `{machine_id}` to KOCH AI...", parse_mode="Markdown")
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                files = {'file': ('photo.jpg', bytes(photo_bytes), 'image/jpeg')}
+                data = {'machine_id': machine_id}
+                response = await client.post(
+                    f"{BACKEND_API_URL}/api/upload/photo",
+                    data=data,
+                    files=files
+                )
+                response.raise_for_status()
+                
+            await status_msg.edit_text(f"✅ Photo uploaded for `{machine_id}`. A background worker is analyzing the image.", parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Failed to post photo: {e}")
+            await status_msg.edit_text(f"❌ Failed to reach the KOCH AI backend to process the photo.")
+    else:
+        # Route to Public Field Notes
+        status_msg = await update.message.reply_text(f"📸 Received unclassified photo. Routing to Public Field Notes board...", parse_mode="Markdown")
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                files = {'file': ('photo.jpg', bytes(photo_bytes), 'image/jpeg')}
+                data = {'sender': sender}
+                response = await client.post(
+                    f"{BACKEND_API_URL}/api/field-notes/photo",
+                    data=data,
+                    files=files
+                )
+                response.raise_for_status()
+            await status_msg.edit_text(f"✅ Photo added to the Public Field Notes triage board.", parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Failed to post public photo note: {e}")
+            await status_msg.edit_text(f"❌ Failed to reach the KOCH AI backend.")
+
+
+@authorized_only
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = update.message.text
+    sender = update.message.from_user.username or "Unknown"
+    
+    status_msg = await update.message.reply_text("📝 Routing note to Public Field Notes board...")
     try:
-        photo_bytes = await photo_file.download_as_bytearray()
-        
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            files = {'file': ('photo.jpg', bytes(photo_bytes), 'image/jpeg')}
-            data = {'machine_id': machine_id}
+        async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(
-                f"{BACKEND_API_URL}/api/upload/photo",
-                data=data,
-                files=files
+                f"{BACKEND_API_URL}/api/field-notes",
+                json={"content": text, "sender": sender, "status": "unclassified"}
             )
             response.raise_for_status()
-            
-        await status_msg.edit_text(f"✅ Photo uploaded for `{machine_id}`. A background worker is extracting metadata and analyzing the image.", parse_mode="Markdown")
+        await status_msg.edit_text("✅ Note added to the Public Field Notes triage board.")
     except Exception as e:
-        logger.error(f"Failed to post photo: {e}")
-        await status_msg.edit_text(f"❌ Failed to reach the KOCH AI backend to process the photo.")
+        logger.error(f"Failed to post public text note: {e}")
+        await status_msg.edit_text("❌ Failed to reach the KOCH AI backend.")
 
 
 def main() -> None:
@@ -190,6 +225,7 @@ def main() -> None:
     application.add_handler(CommandHandler("note", note_command))
     application.add_handler(CommandHandler("ask", ask_command))
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~(filters.COMMAND), text_handler))
 
     logger.info("KOCH AI Field Assistant Bot Starting...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

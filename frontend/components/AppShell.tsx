@@ -1,89 +1,166 @@
 "use client";
 
-import { useState } from "react";
-import { 
-  Database, Box, Activity, Briefcase, 
-  Search, Zap, BrainCircuit, Network, Shield, ChevronRight, ActivitySquare, Terminal, LayoutDashboard, Settings, GitGraph, Clock
+import type { ReactNode } from "react";
+import { useMemo, useRef, useState } from "react";
+import {
+  Activity,
+  ActivitySquare,
+  Box,
+  Briefcase,
+  ChevronRight,
+  Database,
+  GitGraph,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Settings,
+  Shield,
 } from "lucide-react";
 import Link from "next/link";
-import Image from "next/image";
 import { usePathname } from "next/navigation";
 
-export default function AppShell({ children }: { children: React.ReactNode }) {
+const primaryNav = [
+  { href: "/", label: "Command Center", icon: ActivitySquare },
+  { href: "/knowledge-graph", label: "Knowledge Graph", icon: GitGraph },
+  { href: "/vault", label: "Vault Explorer", icon: Database },
+];
+
+const applicationNav = [
+  { href: "/machine-books", label: "Machine Books", icon: Database, disabled: true },
+  { href: "/cad-analyzer", label: "CAD Analyzer", icon: Box, disabled: true },
+  { href: "/field-notes", label: "Field Notes", icon: ActivitySquare, disabled: false },
+  { href: "/field-talk", label: "Field Talk", icon: Activity, disabled: true },
+  { href: "/procurement-intel", label: "Procurement Intel", icon: Briefcase, disabled: true },
+];
+
+const secondaryNav = [
+  { href: "/telemetry", label: "Telemetry", icon: ActivitySquare },
+  { href: "/admin", label: "System Admin", icon: Settings },
+];
+
+export default function AppShell({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const pathname = usePathname();
+  const pageLabel = useMemo(() => getPageLabel(pathname), [pathname]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background text-foreground font-sans selection:bg-primary/30 selection:text-foreground">
-      {/* LEFT SIDEBAR (COLLAPSIBLE) */}
-      <aside className={`${sidebarOpen ? "w-64" : "w-16"} transition-all duration-300 ease-in-out border-r border-border bg-muted flex flex-col relative z-20`}>
-        <div className="h-16 flex items-center justify-between px-4 border-b border-border">
+    <div className="flex h-screen overflow-hidden bg-background text-foreground">
+      <aside className={`${sidebarOpen ? "w-[280px]" : "w-[88px]"} flex flex-col border-r border-border bg-muted/25 transition-all duration-200`}>
+        <div className="flex h-14 items-center gap-3 border-b border-border px-4">
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-border bg-background">
+            <Shield size={17} />
+          </div>
+
           {sidebarOpen && (
-            <div className="flex items-center gap-2 text-primary overflow-hidden whitespace-nowrap">
-              <Shield size={22} className="flex-shrink-0" />
-              <span className="font-mono font-bold tracking-wider text-sm mt-0.5 whitespace-nowrap">KOCH Solutions <span className="text-muted-foreground font-normal">v2.4</span></span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-semibold tracking-tight">Koch Solutions</p>
+              <p className="truncate text-xs text-muted-foreground">Engineering Intelligence</p>
             </div>
           )}
-          <button 
+
+          <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="p-2 -mr-1 rounded hover:bg-card text-muted-foreground hover:text-foreground transition-colors mx-auto"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-background hover:text-foreground"
+            aria-label={sidebarOpen ? "Collapse navigation" : "Expand navigation"}
           >
-            <LayoutDashboard size={20} />
+            {sidebarOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
           </button>
         </div>
 
-        <nav className="flex-1 py-6 flex flex-col gap-2 px-3 overflow-y-auto overflow-x-hidden">
-          <NavItem icon={<ActivitySquare size={18} />} label="Hub / Home" href="/" active={pathname === "/"} open={sidebarOpen} />
-          <NavItem icon={<GitGraph size={18} />} label="Knowledge Graph" href="/knowledge-graph" active={pathname === "/knowledge-graph"} open={sidebarOpen} />
-          <NavItem icon={<Database size={18} />} label="Vault Explorer" href="/vault" active={pathname === "/vault"} open={sidebarOpen} />
+        <nav className="flex-1 overflow-y-auto px-3 py-4">
+          <div className="space-y-1">
+            {primaryNav.map((item) => (
+              <NavItem key={item.href} icon={<item.icon size={18} />} label={item.label} href={item.href} active={pathname === item.href} open={sidebarOpen} />
+            ))}
+          </div>
 
-          {sidebarOpen ? (
-            <div className="mt-4 mb-1 text-[10px] font-mono text-muted-foreground uppercase tracking-widest px-3">Applications</div>
-          ) : (
-            <div className="mt-4 mb-1 border-t border-border mx-2"></div>
-          )}
-          <NavItem icon={<Database size={18} />} label="Machine Books" href="/machine-books" active={pathname === "/machine-books"} open={sidebarOpen} />
-          <NavItem icon={<Box size={18} />} label="CAD Analyzer" href="/cad-analyzer" active={pathname === "/cad-analyzer"} open={sidebarOpen} />
-          <NavItem icon={<Activity size={18} />} label="Field Talk" href="/field-talk" active={pathname === "/field-talk"} open={sidebarOpen} />
-          <NavItem icon={<Briefcase size={18} />} label="Procurement Intel" href="/procurement-intel" active={pathname === "/procurement-intel"} open={sidebarOpen} />
+          <SectionLabel label="Applications" open={sidebarOpen} />
+
+          <div className="space-y-1">
+            {applicationNav.map((item) => (
+              <NavItem key={item.href} icon={<item.icon size={18} />} label={item.label} href={item.href} active={pathname === item.href} open={sidebarOpen} disabled={item.disabled} />
+            ))}
+          </div>
         </nav>
 
-        <div className="p-4 border-t border-border mt-auto flex flex-col gap-2">
-          <NavItem icon={<ActivitySquare size={18} />} label="Telemetry" href="/telemetry" active={pathname === "/telemetry"} open={sidebarOpen} />
-          <NavItem icon={<Settings size={18} />} label="System Admin" href="/admin" active={pathname === "/admin"} open={sidebarOpen} />
+        <div className="border-t border-border px-3 py-3">
+          <div className="space-y-1">
+            {secondaryNav.map((item) => (
+              <NavItem key={item.href} icon={<item.icon size={18} />} label={item.label} href={item.href} active={pathname === item.href} open={sidebarOpen} />
+            ))}
+          </div>
         </div>
       </aside>
 
-      {/* MAIN CONTENT AREA */}
-      <main className="flex-1 flex flex-col min-w-0 bg-background relative overflow-y-auto border-r border-border">
-        {/* Top Header */}
-        <header className="h-16 border-b border-border flex items-center px-6 justify-between bg-muted/80 backdrop-blur sticky top-0 z-10 w-full">
-          <div className="flex items-center gap-4 text-xs font-mono text-muted-foreground">
-            <Image src="/koch_solutions_logo.png" alt="Koch Solutions Logo" width={140} height={28} className="object-contain" />
-            <span className="hidden md:inline">|</span>
-            <span>NETWORK: <span className="text-emerald-600">SECURE</span></span>
-            <span className="hidden md:inline">|</span>
-            <span className="hidden md:inline">DATA_ENCLAVE: <span className="text-primary">ACTIVE</span></span>
-          </div>
-          <div className="flex items-center gap-3">
-             <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)] animate-pulse"></div>
-             <span className="text-xs font-mono text-muted-foreground tracking-wider">SYSTEM ONLINE</span>
+      <main className="flex min-w-0 flex-1 flex-col overflow-y-auto bg-background">
+        <header className="sticky top-0 z-10 border-b border-border bg-background/95 backdrop-blur">
+          <div className="mx-auto flex h-14 w-full max-w-[1440px] items-center justify-between px-5 md:px-8">
+            <div className="min-w-0">
+              <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                <span>Platform</span>
+                <ChevronRight size={14} />
+                <span className="truncate text-foreground">{pageLabel}</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <div className="hidden items-center gap-2 rounded-full border border-border px-3 py-1.5 sm:flex">
+                <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                <span>System online</span>
+              </div>
+              <div className="rounded-full border border-border px-3 py-1.5">Secure enclave</div>
+            </div>
           </div>
         </header>
 
-        <div className="flex-1 p-6 md:p-12 lg:px-16 flex flex-col gap-16 relative w-full h-full">
-          {children}
+        <div className="mx-auto flex w-full max-w-[1440px] flex-1 flex-col px-5 py-6 md:px-8 md:py-8">
+
+
+
+          <div className="flex-1">{children}</div>
         </div>
       </main>
     </div>
   );
 }
 
-function NavItem({ icon, label, href, active = false, open = true }: { icon: React.ReactNode, label: string, href: string, active?: boolean, open: boolean }) {
+function SectionLabel({ label, open }: { label: string; open: boolean }) {
+  if (!open) {
+    return <div className="my-4 border-t border-border" />;
+  }
+
+  return <div className="px-3 pb-2 pt-5 text-xs font-medium text-muted-foreground">{label}</div>;
+}
+
+function NavItem({ icon, label, href, active = false, open = true, disabled = false }: { icon: ReactNode; label: string; href: string; active?: boolean; open: boolean; disabled?: boolean }) {
   return (
-    <Link href={href} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all group overflow-hidden ${active ? "bg-primary/10 text-primary border border-primary/20" : "hover:bg-card text-muted-foreground hover:text-foreground"}`}>
-      <span className={`flex-shrink-0 ${active ? "text-primary" : "text-muted-foreground group-hover:text-foreground"}`}>{icon}</span>
-      {open && <span className="text-xs font-mono uppercase tracking-wider whitespace-nowrap">{label}</span>}
+    <Link
+      href={disabled ? "#" : href}
+      className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition ${
+        disabled 
+          ? "opacity-50 pointer-events-none text-muted-foreground"
+          : active 
+            ? "bg-background font-medium text-foreground shadow-sm" 
+            : "text-muted-foreground hover:bg-background/70 hover:text-foreground"
+      }`}
+      aria-disabled={disabled}
+      tabIndex={disabled ? -1 : undefined}
+    >
+      <span className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg ${disabled ? "text-muted-foreground/60" : active ? "bg-muted text-foreground" : "text-muted-foreground group-hover:bg-muted group-hover:text-foreground"}`}>
+        {icon}
+      </span>
+      {open && (
+        <span className="flex-1 flex justify-between items-center min-w-0">
+          <span className="truncate">{label}</span>
+          {disabled && <span className="ml-2 px-1.5 rounded bg-muted border border-border/50 text-[9px] uppercase tracking-wider font-semibold opacity-70 shrink-0">Soon</span>}
+        </span>
+      )}
     </Link>
   );
+}
+
+function getPageLabel(pathname: string) {
+  const match = [...primaryNav, ...applicationNav, ...secondaryNav].find((item) => item.href === pathname);
+  if (match) return match.label;
+  if (pathname.startsWith("/machines/")) return "Machine Detail";
+  return "Operational Workspace";
 }

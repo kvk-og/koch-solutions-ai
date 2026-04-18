@@ -1,29 +1,23 @@
 import { NextResponse } from 'next/server';
 
-// This is a stub for the Hindsight MCP Server Integration
 export async function GET(
   request: Request,
   { params }: { params: { id: string } }
 ) {
   const id = params.id;
-
-  // In a real scenario, we would forward this request to the Hindsight Server
-  // e.g. const response = await fetch(`${process.env.HINDSIGHT_URL}/graphs/entity/${id}`);
   
-  // Simulated database lookup delay
-  await new Promise((resolve) => setTimeout(resolve, 800));
-
-  // Simulated fallback response
-  const mockData = {
-    id: id,
-    name: "Thyssenkrupp Stacker-Reclaimer #04",
-    serialNumber: `TK-SR-04-${id}`,
-    commissioningDate: "1998-10-15",
-    type: "Material Handling",
-    location: "Zone A, Port Headland",
-    status: "Operational",
-    backendSource: "hindsight-mcp-stub"
-  };
-
-  return NextResponse.json(mockData);
+  try {
+    const backendUrl = process.env.BACKEND_API_URL || 'http://backend-api:8000';
+    const response = await fetch(`${backendUrl}/api/machine/${id}`, { cache: 'no-store' });
+    
+    if (!response.ok) {
+      return NextResponse.json({ error: "Failed to fetch machine" }, { status: response.status });
+    }
+    
+    const data = await response.json();
+    return NextResponse.json(data);
+  } catch (error) {
+    console.error(error);
+    return NextResponse.json({ error: "Backend unreachable" }, { status: 500 });
+  }
 }

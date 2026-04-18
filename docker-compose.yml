@@ -7,7 +7,7 @@
 #
 # Usage:
 #   cp .env.example .env       # Configure secrets & model path
-#   docker compose up --build  # Build and launch the full stack
+#   ./deploy.sh                # Build and launch the full stack
 # =============================================================================
 
 
@@ -29,11 +29,33 @@ volumes:
     driver: local
   shared-uploads:
     driver: local
+  redis-data:
+    driver: local
 
 # ---------------------------------------------------------------------------
 # Services
 # ---------------------------------------------------------------------------
 services:
+  # =========================================================================
+  # 0. Nginx Reverse Proxy — Only Exposed Service
+  # =========================================================================
+  nginx-proxy:
+    image: nginx:alpine
+    container_name: koch-reverse-proxy
+    restart: unless-stopped
+    networks:
+      - koch-internal
+    ports:
+      - "8080:80"
+      # - "443:443"  # Uncomment when SSL certs are ready
+    volumes:
+      - ./reverse-proxy.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      backend-api:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+
   # =========================================================================
   # 1. LLM Proxy — Bypass Cloudflare WAF block on OpenAI SDK default User-Agent
   # =========================================================================
@@ -54,16 +76,24 @@ services:
     image: ghcr.io/vectorize-io/hindsight:latest
     container_name: koch-hindsight
     restart: unless-stopped
+    depends_on:
+      - llm-proxy
     networks:
       - koch-internal
     ports:
-      - "${HINDSIGHT_PORT:-8100}:8888"
+      - "${HINDSIGHT_PORT:-8888}:8888"
+      - "9999:9999"
     environment:
       - HINDSIGHT_API_KEY=${HINDSIGHT_API_KEY:-koch-hindsight-key}
       - HINDSIGHT_STORAGE_DIR=/data
       - HINDSIGHT_API_LLM_API_KEY=${VLLM_API_KEY}
-      - HINDSIGHT_API_LLM_BASE_URL=${VLLM_BASE_URL}
+      - HINDSIGHT_API_LLM_BASE_URL=http://llm-proxy/v1
+      - HINDSIGHT_API_LLM_PROVIDER=openai
       - HINDSIGHT_API_LLM_MODEL=${LLM_MODEL}
+      - HINDSIGHT_LLM_MODEL=${LLM_MODEL}
+      - LLM_MODEL=${LLM_MODEL}
+    env_file:
+      - .env
     volumes:
       - hindsight-data:/data   # Persist memory graph across restarts
     healthcheck:
@@ -82,18 +112,23 @@ services:
       dockerfile: Dockerfile
     container_name: koch-backend
     restart: unless-stopped
-    networks:
-      - koch-internal
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+    networks:
+      - koch-internal
     env_file:
       - .env
     environment:
       # Service discovery — containers resolve each other by service name
       - HINDSIGHT_BASE_URL=http://hindsight:8888
+      - VLLM_BASE_URL=http://llm-proxy/v1
       - WORKER_BASE_URL=http://parser-workers:9000
     depends_on:
+      llm-proxy:
+        condition: service_started
       hindsight:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     volumes:
       - ./backend:/app                 # Hot-reload in development
@@ -119,7 +154,8 @@ services:
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:${BACKEND_PORT:-8000}
+      # The frontend accesses the API via the relative /api/ route handled by Nginx proxy
+      - NEXT_PUBLIC_API_URL=/
     depends_on:
       backend-api:
         condition: service_healthy
@@ -131,10 +167,16 @@ services:
     image: redis:alpine
     container_name: koch-redis
     restart: unless-stopped
+    command: redis-server --appendonly yes
     networks:
       - koch-internal
-    ports:
-      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # =========================================================================
   # 9. Image Processor Worker — Celery Pipeline for Photo Ingestion
@@ -153,12 +195,17 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - HINDSIGHT_BASE_URL=http://hindsight:8888
+      - VLLM_BASE_URL=http://llm-proxy/v1
     depends_on:
-      - redis
+      llm-proxy:
+        condition: service_started
+      redis:
+        condition: service_healthy
     volumes:
       - ./workers:/app
       - /app/__pycache__
       - shared-uploads:/app/uploads
+      
   # =========================================================================
   # 5. Parser Workers — Document Ingestion Pipeline (Docling + VLM)
   # =========================================================================
@@ -170,13 +217,14 @@ services:
     restart: unless-stopped
     networks:
       - koch-internal
-    ports:
-      - "${WORKER_PORT:-9000}:9000"
     env_file:
       - .env
     environment:
       - HINDSIGHT_BASE_URL=http://hindsight:8888
+      - VLLM_BASE_URL=http://llm-proxy/v1
     depends_on:
+      llm-proxy:
+        condition: service_started
       hindsight:
         condition: service_healthy
     volumes:
@@ -195,13 +243,14 @@ services:
     command: ["uvicorn", "cad_processor:app", "--host", "0.0.0.0", "--port", "9001", "--reload"]
     networks:
       - koch-internal
-    ports:
-      - "9001:9001"
     env_file:
       - .env
     environment:
       - HINDSIGHT_BASE_URL=http://hindsight:8888
+      - VLLM_BASE_URL=http://llm-proxy/v1
     depends_on:
+      llm-proxy:
+        condition: service_started
       hindsight:
         condition: service_healthy
     volumes:

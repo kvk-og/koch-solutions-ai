@@ -18,6 +18,10 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://hindsight:8100")
 HINDSIGHT_API_KEY = os.getenv("HINDSIGHT_API_KEY", "koch-hindsight-key")
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "https://api.ingham.ai/v1")
+VLLM_API_KEY = os.getenv("VLLM_API_KEY", "inghamai-8101997")
+LLM_MODEL = os.getenv("LLM_MODEL", "google/gemma-4-26B-A4B-it")
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("koch-image-processor")
@@ -79,20 +83,42 @@ def extract_exif_metadata(filepath: str) -> dict:
 
 def analyze_image_content(filepath: str) -> str:
     """
-    Mock function simulating passing the image to a local VLM (e.g., LLaVA)
+    Pass the image to the local VLM (e.g., LLaVA or a Vision-capable LLM)
     to generate a descriptive text summary of physical damage or machine state.
     """
-    # In a real scenario, we would load the image bytes and call vllm
-    logger.info(f"Simulating VLM analysis for {filepath}...")
+    import base64
+    from openai import OpenAI
     
-    # Mock VLM Text Summary
-    summary = (
-        "Visual analysis confirms moderate wear on the primary drive belt housing. "
-        "No critical fractures identified, but there is noticeable grease buildup "
-        "near the secondary bearing seal. Recommend cleaning and inspection during "
-        "the next maintenance cycle."
-    )
-    return summary
+    logger.info(f"Sending visual query to VLM for {filepath}...")
+    
+    try:
+        with open(filepath, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            
+        client = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a professional industrial field engineer. Analyze this raw field photo. Briefly summarize any visible equipment, damage, context, or abnormalities."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What do you see in this field photo?"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded_string}"}}
+                    ]
+                }
+            ],
+            max_tokens=512,
+            temperature=0.2
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"VLM Analysis Failed: {e}")
+        return f"VLM Analysis Failed: {str(e)}"
+
 
 def create_visual_field_report(filepath: str, machine_id: str) -> dict:
     """
@@ -125,7 +151,7 @@ def create_visual_field_report(filepath: str, machine_id: str) -> dict:
     
     return payload
 
-@celery_app.task(name="image_processor.process_photo_task", bind=True)
+@celery_app.task(name="image_processor.process_photo_task", bind=True, max_retries=3)
 def process_photo_task(self, filepath: str, machine_id: str):
     """
     Celery task to process an uploaded photo, extract data, and post to Hindsight.
@@ -143,7 +169,7 @@ def process_photo_task(self, filepath: str, machine_id: str):
         
         # Post to Hindsight Retain API
         response = requests.post(
-            f"{HINDSIGHT_BASE_URL}/api/v1/retain",
+            f"{HINDSIGHT_BASE_URL}/v1/retain",
             json=report_payload,
             headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
             timeout=30.0
