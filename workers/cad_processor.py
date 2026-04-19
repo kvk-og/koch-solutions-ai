@@ -72,18 +72,19 @@ async def commit_to_hindsight(
     namespace: str = "cad_models",
 ) -> dict:
     payload = {
-        "content": content,
-        "namespace": namespace,
-        "metadata": {
-            **metadata,
-            "ingested_at": datetime.now(timezone.utc).isoformat(),
-            "content_hash": f"sha256:{hashlib.sha256(content.encode()).hexdigest()[:16]}",
-        },
+        "items": [{
+            "content": content,
+            "metadata": {
+                **metadata,
+                "ingested_at": datetime.now(timezone.utc).isoformat(),
+                "content_hash": f"sha256:{hashlib.sha256(content.encode()).hexdigest()[:16]}",
+            }
+        }]
     }
 
     try:
         response = await http_client.post(
-            f"{HINDSIGHT_BASE_URL}/v1/retain",
+            f"{HINDSIGHT_BASE_URL}/v1/default/banks/{namespace}/memories",
             json=payload,
             headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
         )

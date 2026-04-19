@@ -87,7 +87,7 @@ services:
       - HINDSIGHT_API_KEY=${HINDSIGHT_API_KEY:-koch-hindsight-key}
       - HINDSIGHT_STORAGE_DIR=/data
       - HINDSIGHT_API_LLM_API_KEY=${VLLM_API_KEY}
-      - HINDSIGHT_API_LLM_BASE_URL=http://llm-proxy/v1
+      - HINDSIGHT_API_LLM_BASE_URL=${VLLM_BASE_URL}
       - HINDSIGHT_API_LLM_PROVIDER=openai
       - HINDSIGHT_API_LLM_MODEL=${LLM_MODEL}
       - HINDSIGHT_LLM_MODEL=${LLM_MODEL}
@@ -121,7 +121,7 @@ services:
     environment:
       # Service discovery — containers resolve each other by service name
       - HINDSIGHT_BASE_URL=http://hindsight:8888
-      - VLLM_BASE_URL=http://llm-proxy/v1
+      - VLLM_BASE_URL=${VLLM_BASE_URL}
       - WORKER_BASE_URL=http://parser-workers:9000
     depends_on:
       llm-proxy:
@@ -155,7 +155,7 @@ services:
       - "${FRONTEND_PORT:-3000}:3000"
     environment:
       # The frontend accesses the API via the relative /api/ route handled by Nginx proxy
-      - NEXT_PUBLIC_API_URL=/
+      - NEXT_PUBLIC_API_URL=
     depends_on:
       backend-api:
         condition: service_healthy
@@ -195,7 +195,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - HINDSIGHT_BASE_URL=http://hindsight:8888
-      - VLLM_BASE_URL=http://llm-proxy/v1
+      - VLLM_BASE_URL=${VLLM_BASE_URL}
     depends_on:
       llm-proxy:
         condition: service_started
@@ -221,7 +221,7 @@ services:
       - .env
     environment:
       - HINDSIGHT_BASE_URL=http://hindsight:8888
-      - VLLM_BASE_URL=http://llm-proxy/v1
+      - VLLM_BASE_URL=${VLLM_BASE_URL}
     depends_on:
       llm-proxy:
         condition: service_started
@@ -247,7 +247,7 @@ services:
       - .env
     environment:
       - HINDSIGHT_BASE_URL=http://hindsight:8888
-      - VLLM_BASE_URL=http://llm-proxy/v1
+      - VLLM_BASE_URL=${VLLM_BASE_URL}
     depends_on:
       llm-proxy:
         condition: service_started

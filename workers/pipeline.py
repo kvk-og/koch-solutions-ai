@@ -119,18 +119,19 @@ async def commit_to_hindsight(
     }
     """
     payload = {
-        "content": content,
-        "bank_id": "koch_graph",
-        "metadata": {
-            **metadata,
-            "ingested_at": datetime.now(timezone.utc).isoformat(),
-            "content_hash": f"sha256:{hashlib.sha256(content.encode()).hexdigest()[:16]}",
-        },
+        "items": [{
+            "content": content,
+            "metadata": {
+                **metadata,
+                "ingested_at": datetime.now(timezone.utc).isoformat(),
+                "content_hash": f"sha256:{hashlib.sha256(content.encode()).hexdigest()[:16]}",
+            }
+        }]
     }
 
     try:
         response = await http_client.post(
-            f"{HINDSIGHT_BASE_URL}/v1/retain",
+            f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/memories",
             json=payload,
             headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
         )
@@ -281,7 +282,7 @@ async def extract_with_vlm(file_bytes: bytes, filename: str) -> list[dict]:
                     ],
                 },
             ],
-            max_tokens=2048,
+            max_completion_tokens=2048,
             temperature=0.1,  # Low temperature for factual extraction
         )
         

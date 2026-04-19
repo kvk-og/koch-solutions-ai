@@ -335,20 +335,13 @@ async def query_hindsight_context(query: str, conversation_id: Optional[str] = N
         Dictionary containing retrieved memories, entities, and metadata
     """
     try:
+        bank_id = conversation_id if conversation_id else "koch_graph"
         payload = {
             "query": query,
-            "bank_id": "koch_graph",
-            "top_k": top_k,                    # Number of memory fragments to retrieve
-            "include_entities": True,        # Include entity graph connections
-            "include_temporal": True,        # Include temporal ordering
         }
 
-        # Scope retrieval to a specific conversation if provided
-        if conversation_id:
-            payload["bank_id"] = conversation_id
-
         response = await http_client.post(
-            f"{HINDSIGHT_BASE_URL}/v1/recall",
+            f"{HINDSIGHT_BASE_URL}/v1/default/banks/{bank_id}/memories/recall",
             json=payload,
             headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
         )
@@ -356,17 +349,17 @@ async def query_hindsight_context(query: str, conversation_id: Optional[str] = N
 
         data = response.json()
         logger.info(
-            f"Hindsight returned {len(data.get('memories', []))} memory fragments "
-            f"and {len(data.get('entities', []))} linked entities"
+            f"Hindsight returned {len(data.get('results', []))} memory fragments "
+            f"and {len(data.get('entities', {}))} linked entities"
         )
         return data
 
     except httpx.HTTPStatusError as e:
         logger.warning(f"Hindsight query failed (HTTP {e.response.status_code}): {e}")
-        return {"memories": [], "entities": [], "error": str(e)}
+        return {"results": [], "entities": {}, "error": str(e)}
     except httpx.ConnectError:
         logger.warning("Hindsight service unreachable — proceeding without context")
-        return {"memories": [], "entities": [], "error": "Service unreachable"}
+        return {"results": [], "entities": {}, "error": "Service unreachable"}
 
 
 def format_context_prompt(
@@ -383,8 +376,8 @@ def format_context_prompt(
       3. User's actual question
     """
     # Extract and format memory fragments
-    memories = hindsight_context.get("memories", [])
-    entities = hindsight_context.get("entities", [])
+    memories = hindsight_context.get("results", [])
+    entities_dict = hindsight_context.get("entities", {})
 
     context_blocks = []
 
@@ -392,22 +385,19 @@ def format_context_prompt(
     if memories:
         context_blocks.append("=== RETRIEVED ENGINEERING CONTEXT ===")
         for i, mem in enumerate(memories, 1):
-            timestamp = mem.get("timestamp", "unknown")
-            source = mem.get("source", "unknown")
-            content = mem.get("content", "")
-            relevance = mem.get("relevance_score", 0.0)
+            timestamp = mem.get("occurred_start", "unknown")
+            source = mem.get("type", "unknown")
+            content = mem.get("text", "")
             context_blocks.append(
-                f"[Memory {i}] (source: {source}, date: {timestamp}, relevance: {relevance:.2f})\n{content}"
+                f"[Memory {i}] (type: {source}, date: {timestamp})\n{content}"
             )
 
     # Format linked entities (equipment, systems, standards)
-    if entities:
+    if entities_dict:
         context_blocks.append("\n=== LINKED ENTITIES ===")
-        for ent in entities:
-            ent_type = ent.get("type", "unknown")
-            ent_name = ent.get("name", "unknown")
-            ent_desc = ent.get("description", "")
-            context_blocks.append(f"• [{ent_type}] {ent_name}: {ent_desc}")
+        import json
+        for ent_name, ent_data in entities_dict.items():
+            context_blocks.append(f"• [ENTITY] {ent_name}: {len(ent_data.get('observations', []))} observations recorded")
 
     context_str = "\n\n".join(context_blocks) if context_blocks else "No prior context available."
 
@@ -682,7 +672,7 @@ async def chat(request: ChatRequest):
                 stream = await vllm_client.chat.completions.create(
                     model=LLM_MODEL,
                     messages=messages,
-                    max_tokens=request.max_tokens,
+                    max_completion_tokens=request.max_tokens,
                     temperature=request.temperature,
                     stream=True,
                 )
@@ -703,15 +693,16 @@ async def chat(request: ChatRequest):
                 # ── Step 4: Commit the Q&A pair to Hindsight for future context ──
                 try:
                     await http_client.post(
-                        f"{HINDSIGHT_BASE_URL}/v1/retain",
+                        f"{HINDSIGHT_BASE_URL}/v1/default/banks/{conversation_id}/memories",
                         json={
-                            "content": f"Q: {request.query}\nA: {full_response}",
-                            "namespace": conversation_id,
-                            "metadata": {
-                                "type": "conversation",
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                                "source": "chat",
-                            },
+                            "items": [{
+                                "content": f"Q: {request.query}\nA: {full_response}",
+                                "metadata": {
+                                    "type": "conversation",
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "source": "chat",
+                                }
+                            }]
                         },
                         headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
                     )
@@ -839,15 +830,16 @@ async def chat(request: ChatRequest):
                             
                         try:
                             await http_client.post(
-                                f"{HINDSIGHT_BASE_URL}/v1/retain",
+                                f"{HINDSIGHT_BASE_URL}/v1/default/banks/{conversation_id}/memories",
                                 json={
-                                    "content": f"Q: {request.query}\\nA: {full_response}",
-                                    "namespace": conversation_id,
-                                    "metadata": {
-                                        "type": "conversation",
-                                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                                        "source": "agent",
-                                    },
+                                    "items": [{
+                                        "content": f"Q: {request.query}\\nA: {full_response}",
+                                        "metadata": {
+                                            "type": "conversation",
+                                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                                            "source": "agent",
+                                        }
+                                    }]
                                 },
                                 headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
                             )
@@ -932,17 +924,18 @@ async def get_field_messages(thread_id: str):
 async def create_field_message(thread_id: str = Form(...), sender: str = Form(...), name: str = Form(...), text: str = Form(...)):
     # Post directly to Hindsight
     payload = {
-        "content": f"FieldMessage from {sender} ({name}): {text}",
-        "namespace": thread_id,
-        "metadata": {
-            "type": "field_message",
-            "sender": sender,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
+        "items": [{
+            "content": f"FieldMessage from {sender} ({name}): {text}",
+            "metadata": {
+                "type": "field_message",
+                "sender": sender,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        }]
     }
     try:
         await http_client.post(
-            f"{HINDSIGHT_BASE_URL}/v1/retain",
+            f"{HINDSIGHT_BASE_URL}/v1/default/banks/{thread_id}/memories",
             json=payload,
             headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"}
         )
@@ -963,19 +956,45 @@ async def get_procurement_parts():
     return [{"id": m.get("id"), "part_info": m.get("content")} for m in memories]
 
 @app.get("/api/telemetry/nodes", tags=["Database"])
-async def get_telemetry_nodes(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(models.TelemetryNode))
-    nodes = result.scalars().all()
-    return [
-        {
-            "id": n.id,
-            "status": n.status,
-            "load": n.load,
-            "latency": n.latency,
-            "desc": n.desc
-        }
-        for n in nodes
-    ]
+async def get_telemetry_nodes():
+    nodes = []
+    # Test vLLM
+    try:
+        start = time.time()
+        resp = await http_client.get(f"{VLLM_BASE_URL}/models", headers={"Authorization": f"Bearer {VLLM_API_KEY}"})
+        lat = int((time.time() - start) * 1000)
+        nodes.append({"id": "vllm-engine", "status": "online" if resp.status_code == 200 else "warning", "load": 40 if resp.status_code == 200 else 90, "latency": lat, "desc": "Local LLM Inference Engine"})
+    except Exception:
+        nodes.append({"id": "vllm-engine", "status": "offline", "load": 0, "latency": 0, "desc": "Local LLM Inference Engine"})
+        
+    # Test Hindsight
+    try:
+        start = time.time()
+        resp = await http_client.get(f"{HINDSIGHT_BASE_URL}/health")
+        lat = int((time.time() - start) * 1000)
+        nodes.append({"id": "hindsight-memory", "status": "online" if resp.status_code == 200 else "warning", "load": 20, "latency": lat, "desc": "Temporal Knowledge Graph"})
+    except Exception:
+        nodes.append({"id": "hindsight-memory", "status": "offline", "load": 0, "latency": 0, "desc": "Temporal Knowledge Graph"})
+        
+    # Test Workers
+    try:
+        start = time.time()
+        resp = await http_client.get(f"{WORKER_BASE_URL}/health")
+        lat = int((time.time() - start) * 1000)
+        nodes.append({"id": "docling-workers", "status": "online" if resp.status_code == 200 else "warning", "load": 15, "latency": lat, "desc": "Document Parsing Pipeline"})
+    except Exception:
+        nodes.append({"id": "docling-workers", "status": "offline", "load": 0, "latency": 0, "desc": "Document Parsing Pipeline"})
+        
+    # Test CAD Workers
+    try:
+        start = time.time()
+        resp = await http_client.get(f"{CAD_WORKER_BASE_URL}/health")
+        lat = int((time.time() - start) * 1000)
+        nodes.append({"id": "cad-workers", "status": "online" if resp.status_code == 200 else "warning", "load": 25, "latency": lat, "desc": "CAD Ingestion Pipeline"})
+    except Exception:
+        nodes.append({"id": "cad-workers", "status": "offline", "load": 0, "latency": 0, "desc": "CAD Ingestion Pipeline"})
+        
+    return nodes
 
 @app.get("/api/telemetry/throughput", tags=["Database"])
 async def get_telemetry_throughput():
@@ -997,7 +1016,8 @@ async def get_machine(machine_id: str, db: AsyncSession = Depends(get_db)):
     
     # Query Hindsight for actual machine entities
     res = await query_hindsight_context(f"components and parts for {machine.name}")
-    entities = res.get("entities", [])
+    entities_dict = res.get("entities", {})
+    entities = [{"id": k, "name": k} for k in entities_dict.keys()]
     
     import math
     import uuid
@@ -1094,11 +1114,21 @@ async def get_global_knowledge_graph(db: AsyncSession = Depends(get_db)):
 
     # 2. Query Hindsight (Temporal Memory)
     res = await query_hindsight_context("machine component system failure maintenance document field report log", top_k=20)
-    memories = res.get("memories", [])
-    entities = res.get("entities", [])
+    memories = res.get("results", [])
+    entities_dict = res.get("entities", {})
     
-    valid_entities = [e for e in entities if e.get("name")]
-    valid_memories = [m for m in memories if m.get("content")]
+    valid_entities = [{"id": k, "name": k, "data": v} for k, v in entities_dict.items()]
+    valid_memories = [m for m in memories if m.get("text")]
+    
+    # Cap total elements to 100 to prevent graph clutter processing
+    max_elements = 100
+    machines = machines[:max_elements]
+    docs_to_show = max_elements - len(machines)
+    vault_files = vault_files[:max(0, docs_to_show)]
+    entities_to_show = max_elements - (len(machines) + len(vault_files))
+    valid_entities = valid_entities[:max(0, entities_to_show)]
+    mem_to_show = max_elements - (len(machines) + len(vault_files) + len(valid_entities))
+    valid_memories = valid_memories[:max(0, mem_to_show)]
     
     # Total grid elements
     total_elements = len(machines) + len(vault_files) + len(valid_entities) + len(valid_memories)
@@ -1171,7 +1201,7 @@ async def get_global_knowledge_graph(db: AsyncSession = Depends(get_db)):
         nodes.append({
             "id": mem_id,
             "position": {"x": col * spacing + offset_x + random.randint(-50,50), "y": row * spacing + offset_y + random.randint(-50,50)},
-            "data": {"label": str(mem.get("content", "Memory"))[:35] + "..."},
+            "data": {"label": str(mem.get("text", "Memory"))[:35] + "..."},
             "style": {"background": "#0f1419", "color": "#a0aec0", "border": "1px dashed #4b5563", "borderRadius": "8px", "padding": "10px", "fontSize": "11px"}
         })
         
@@ -1289,15 +1319,16 @@ async def add_field_note(note: FieldNoteRequest):
     """
     try:
         response = await http_client.post(
-            f"{HINDSIGHT_BASE_URL}/v1/retain",
+            f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/memories",
             json={
-                "content": f"Field Observation: {note.text}",
-                "bank_id": "koch_graph",
-                "metadata": {
-                    "source": "Mobile Field Technician",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "document_type": "field_note"
-                }
+                "items": [{
+                    "content": f"Field Observation: {note.text}",
+                    "metadata": {
+                        "source": "Mobile Field Technician",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "document_type": "field_note"
+                    }
+                }]
             },
             headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
         )
@@ -1355,15 +1386,16 @@ async def update_public_note(note_id: str, note_update: PublicNoteRequest, db: A
     if note_update.status == "classified" and note_update.classified_machine_id:
         try:
             await http_client.post(
-                f"{HINDSIGHT_BASE_URL}/v1/retain",
+                f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/memories",
                 json={
-                    "content": f"Field Observation: {note_update.content}",
-                    "bank_id": "koch_graph",
-                    "metadata": {
-                        "source": "Public Field Notes Triage",
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "document_type": "field_note"
-                    }
+                    "items": [{
+                        "content": f"Field Observation: {note_update.content}",
+                        "metadata": {
+                            "source": "Public Field Notes Triage",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "document_type": "field_note"
+                        }
+                    }]
                 },
                 headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
             )

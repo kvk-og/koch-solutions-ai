@@ -111,7 +111,7 @@ def analyze_image_content(filepath: str) -> str:
                     ]
                 }
             ],
-            max_tokens=512,
+            max_completion_tokens=512,
             temperature=0.2
         )
         return response.choices[0].message.content
@@ -138,15 +138,16 @@ def create_visual_field_report(filepath: str, machine_id: str) -> dict:
         report_content += f"- **{key}:** {value}\n"
         
     payload = {
-        "content": report_content,
-        "namespace": "field_observations",
-        "metadata": {
-            "Type": "Field Photo",
-            "Source": "Camera",
-            "Machine_ID": machine_id,
-            "filename": os.path.basename(filepath),
-            "ingested_at": datetime.now(timezone.utc).isoformat()
-        }
+        "items": [{
+            "content": report_content,
+            "metadata": {
+                "Type": "Field Photo",
+                "Source": "Camera",
+                "Machine_ID": machine_id,
+                "filename": os.path.basename(filepath),
+                "ingested_at": datetime.now(timezone.utc).isoformat()
+            }
+        }]
     }
     
     return payload
@@ -169,7 +170,7 @@ def process_photo_task(self, filepath: str, machine_id: str):
         
         # Post to Hindsight Retain API
         response = requests.post(
-            f"{HINDSIGHT_BASE_URL}/v1/retain",
+            f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/memories",
             json=report_payload,
             headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
             timeout=30.0

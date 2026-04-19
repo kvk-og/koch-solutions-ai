@@ -14,12 +14,14 @@ import {
   PanelLeftOpen,
   Settings,
   Shield,
+  Workflow,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const primaryNav = [
-  { href: "/", label: "Command Center", icon: ActivitySquare },
+  { href: "/", label: "Chat", icon: ActivitySquare },
+  { href: "/agent", label: "Agent", icon: Workflow },
   { href: "/knowledge-graph", label: "Knowledge Graph", icon: GitGraph },
   { href: "/vault", label: "Vault Explorer", icon: Database },
 ];

@@ -30,6 +30,8 @@ interface GlobalState {
   setChatMode: React.Dispatch<React.SetStateAction<"chat" | "agent">>;
   chatHistory: Message[];
   setChatHistory: React.Dispatch<React.SetStateAction<Message[]>>;
+  agentHistory: Message[];
+  setAgentHistory: React.Dispatch<React.SetStateAction<Message[]>>;
   activeApp: string;
   setActiveApp: React.Dispatch<React.SetStateAction<string>>;
 }
@@ -39,6 +41,7 @@ const GlobalContext = createContext<GlobalState | undefined>(undefined);
 export function GlobalProvider({ children }: { children: ReactNode }) {
   const [chatMode, setChatMode] = useState<"chat" | "agent">("chat");
   const [chatHistory, setChatHistory] = useState<Message[]>([]);
+  const [agentHistory, setAgentHistory] = useState<Message[]>([]);
   const [activeApp, setActiveApp] = useState<string>("home");
 
   return (
@@ -48,6 +51,8 @@ export function GlobalProvider({ children }: { children: ReactNode }) {
         setChatMode,
         chatHistory,
         setChatHistory,
+        agentHistory,
+        setAgentHistory,
         activeApp,
         setActiveApp,
       }}

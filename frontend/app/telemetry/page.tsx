@@ -24,6 +24,11 @@ export default function Telemetry() {
     };
     fetchData();
   }, []);
+  const avgLoad = nodes.length ? (nodes.reduce((acc, n) => acc + n.load, 0) / nodes.length).toFixed(1) : "0.0";
+  const avgLatency = nodes.length ? Math.round(nodes.reduce((acc, n) => acc + n.latency, 0) / nodes.length) : 0;
+  const storageIo = sparkline.length ? Math.round(sparkline.reduce((acc, val) => acc + val, 0) * 1.5) : 0;
+  const criticalCount = nodes.filter(n => n.status !== 'online').length;
+
   return (
     <div className="flex flex-col gap-6 w-full h-[calc(100vh-140px)] overflow-y-auto">
       {/* Header Stats */}
@@ -34,7 +39,7 @@ export default function Telemetry() {
             <span className="text-emerald-500 bg-emerald-500/10 px-2 py-0.5 rounded text-xs font-mono">Stable</span>
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-semibold text-foreground">42.8</span>
+            <span className="text-3xl font-semibold text-foreground">{avgLoad}</span>
             <span className="text-sm text-muted-foreground">%</span>
           </div>
         </div>
@@ -44,17 +49,17 @@ export default function Telemetry() {
             <span className="text-emerald-500 bg-emerald-500/10 px-2 py-0.5 rounded text-xs font-mono">Fast</span>
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-semibold text-foreground">12</span>
+            <span className="text-3xl font-semibold text-foreground">{avgLatency}</span>
             <span className="text-sm text-muted-foreground">ms</span>
           </div>
         </div>
         <div className="bg-card border border-border rounded-xl p-5 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-medium text-muted-foreground flex items-center gap-2"><HardDrive className="w-4 h-4"/> Storage I/O</h3>
-            <span className="text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded text-xs font-mono">Elevated</span>
+            <span className="text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded text-xs font-mono">Stable</span>
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-semibold text-foreground">840</span>
+            <span className="text-3xl font-semibold text-foreground">{storageIo}</span>
             <span className="text-sm text-muted-foreground">MB/s</span>
           </div>
         </div>
@@ -63,7 +68,7 @@ export default function Telemetry() {
             <h3 className="text-sm font-medium text-muted-foreground flex items-center gap-2"><AlertOctagon className="w-4 h-4 text-destructive"/> Active Alerts</h3>
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-semibold text-foreground text-destructive">3</span>
+            <span className="text-3xl font-semibold text-foreground text-destructive">{criticalCount}</span>
             <span className="text-sm text-muted-foreground">Critical</span>
           </div>
         </div>

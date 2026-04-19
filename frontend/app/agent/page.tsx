@@ -22,19 +22,17 @@ const capabilityCards = [
   },
 ];
 
-export default function WorkspaceHub() {
-  const { chatHistory, setChatHistory } = useGlobalState();
+export default function AgentHub() {
+  const { agentHistory, setAgentHistory } = useGlobalState();
   const [query, setQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  const [mode, setMode] = useState<"chat"|"agent">("chat");
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [chatHistory]);
+  }, [agentHistory]);
 
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -43,7 +41,7 @@ export default function WorkspaceHub() {
     const userMessage = { id: Date.now().toString(), text: query, isAi: false };
     const aiMessageId = (Date.now() + 1).toString();
     
-    setChatHistory([...chatHistory, userMessage, { id: aiMessageId, text: "", isAi: true }]);
+    setAgentHistory([...agentHistory, userMessage, { id: aiMessageId, text: "", isAi: true }]);
     setQuery("");
     setIsLoading(true);
 
@@ -51,7 +49,7 @@ export default function WorkspaceHub() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: userMessage.text, mode: mode })
+        body: JSON.stringify({ query: userMessage.text, mode: "agent" })
       });
 
       if (!res.body) throw new Error("No response body");
@@ -75,15 +73,11 @@ export default function WorkspaceHub() {
             try {
               const data = JSON.parse(dataStr);
               if (data.content) {
-                // If it's a thought, format it gracefully.
-                const newText = data.type === 'thought' 
-                  ? `[Processing: ${data.content}]\\n` 
-                  : data.content;
-                aiText += newText;
-                setChatHistory(prev => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: aiText } : msg));
+                aiText += data.content;
+                setAgentHistory(prev => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: aiText } : msg));
               } else if (data.error) {
-                aiText += `\\n\\n[Error: ${data.error}]`;
-                setChatHistory(prev => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: aiText } : msg));
+                aiText += `\n\n[Error: ${data.error}]`;
+                setAgentHistory(prev => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: aiText } : msg));
               }
             } catch (err) {
               console.error("Parse error on chunk", dataStr, err);
@@ -93,7 +87,7 @@ export default function WorkspaceHub() {
       }
     } catch (error) {
       console.error("Chat error:", error);
-      setChatHistory(prev => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: "An error occurred connecting to the backend." } : msg));
+      setAgentHistory(prev => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: "An error occurred connecting to the backend." } : msg));
     } finally {
       setIsLoading(false);
     }
@@ -112,14 +106,14 @@ export default function WorkspaceHub() {
 
       {/* Main Chat Area */}
       <div className="flex-1 overflow-y-auto px-4 md:px-8 pt-20 pb-40" ref={scrollRef}>
-        {chatHistory.length === 0 ? (
+        {agentHistory.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center max-w-4xl mx-auto space-y-12">
             <div className="text-center space-y-4">
               <h1 className="text-4xl font-semibold tracking-tight text-foreground">
-                How can I help you today?
+                How can Hermes Agent assist?
               </h1>
               <p className="text-muted-foreground">
-                Search engineering knowledge, manuals, drawings, and secure vault records.
+                Hermes searches engineering knowledge and conducts deep reasoning against available docs.
               </p>
             </div>
             
@@ -137,7 +131,7 @@ export default function WorkspaceHub() {
           </div>
         ) : (
           <div className="max-w-3xl mx-auto space-y-6">
-            {chatHistory.map((msg) => (
+            {agentHistory.map((msg) => (
               <div key={msg.id} className={`flex gap-4 ${msg.isAi ? "" : "flex-row-reverse"}`}>
                 <div className="h-8 w-8 rounded-full bg-muted flex items-center justify-center shrink-0 mt-1">
                   {msg.isAi ? <Bot size={16} /> : <User size={16} />}
@@ -165,26 +159,24 @@ export default function WorkspaceHub() {
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleKeyDown}
               disabled={isLoading}
-              placeholder={`Message Koch AI...`}
+              placeholder={`Message Hermes Agent...`}
               className="w-full max-h-48 min-h-[56px] resize-none rounded-2xl bg-transparent py-4 pl-4 pr-12 text-sm text-foreground outline-none disabled:opacity-50"
               rows={1}
             />
-            <div className="flex items-center justify-end px-4 pb-3">
-              <button
-                type="submit"
-                disabled={!query.trim() || isLoading}
-                className={`rounded-lg p-1.5 transition-colors ${
-                  !query.trim() || isLoading 
-                    ? "text-muted-foreground opacity-50 cursor-not-allowed" 
-                    : "bg-foreground text-background hover:bg-foreground/90"
-                }`}
-              >
-                <Send size={18} />
-              </button>
-            </div>
+            <button
+              type="submit"
+              disabled={!query.trim() || isLoading}
+              className={`absolute right-3 bottom-3 rounded-lg p-1.5 transition-colors ${
+                !query.trim() || isLoading 
+                  ? "text-muted-foreground opacity-50 cursor-not-allowed" 
+                  : "bg-foreground text-background hover:bg-foreground/90"
+              }`}
+            >
+              <Send size={18} />
+            </button>
           </form>
           <div className="text-center mt-2 text-xs text-muted-foreground">
-            Koch AI can make mistakes. Consider verifying important engineering information.
+            Hermes Agent reasoning can be computationally intensive and may take longer to reply.
           </div>
         </div>
       </div>
