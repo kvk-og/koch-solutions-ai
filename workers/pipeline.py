@@ -38,6 +38,9 @@ from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, Field
 from openai import AsyncOpenAI
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -185,42 +188,47 @@ async def parse_with_docling(file_bytes: bytes, filename: str) -> list[dict]:
     """
     logger.info(f"[DOCLING] Parsing document: {filename} ({len(file_bytes)} bytes)")
 
+    import hashlib
+    file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
+
     # ── PRODUCTION IMPLEMENTATION ──
-    from docling.document_converter import DocumentConverter
-    
-    # Write bytes to a temporary file for docling
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=os.path.splitext(filename)[1], delete=False) as tmp:
-        tmp.write(file_bytes)
-        tmp_path = tmp.name
-    
     try:
-        converter = DocumentConverter()
-        result = converter.convert(tmp_path)
-        doc = result.document
-    
-        parsed_chunks = []
-        for i, element in enumerate(doc.iterate_items()):
-            chunk = {
-                "content": element.text,
-                "metadata": {
-                    "source": filename,
-                    "section": element.label if hasattr(element, 'label') else f"chunk_{i}",
-                    "page": element.prov[0].page_no if element.prov else None,
-                    "document_type": "parsed",
-                    "file_hash": file_hash,
-                    "parser": "docling",
-                },
-            }
-            parsed_chunks.append(chunk)
+        from docling.document_converter import DocumentConverter
+        
+        # Write bytes to a temporary file for docling
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=os.path.splitext(filename)[1], delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+            
+        try:
+            converter = DocumentConverter()
+            result = converter.convert(tmp_path)
+            doc = result.document
+        
+            parsed_chunks = []
+            for i, element in enumerate(doc.iterate_items()):
+                chunk = {
+                    "content": element.text,
+                    "metadata": {
+                        "source": filename,
+                        "section": element.label if hasattr(element, 'label') else f"chunk_{i}",
+                        "page": element.prov[0].page_no if element.prov else None,
+                        "document_type": "parsed",
+                        "file_hash": file_hash,
+                        "parser": "docling",
+                    },
+                }
+                parsed_chunks.append(chunk)
+        finally:
+            os.unlink(tmp_path)
+            
     except Exception as e:
         logger.error(f"[DOCLING] parsing failed for {filename}: {e}")
         parsed_chunks = [{
             "content": f"Failed to parse document {filename}",
             "metadata": {"source": filename, "status": "error", "file_hash": file_hash, "parser": "docling"}
         }]
-    finally:
-        os.unlink(tmp_path)
 
     logger.info(f"[DOCLING] Extracted {len(parsed_chunks)} chunks from {filename}")
     return parsed_chunks

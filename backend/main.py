@@ -335,7 +335,9 @@ async def query_hindsight_context(query: str, conversation_id: Optional[str] = N
         Dictionary containing retrieved memories, entities, and metadata
     """
     try:
-        bank_id = conversation_id if conversation_id else "koch_graph"
+        # Always perform retrievals against the master engineering graph 
+        # (which holds both documents and conversations).
+        bank_id = "koch_graph"
         payload = {
             "query": query,
         }
@@ -349,8 +351,8 @@ async def query_hindsight_context(query: str, conversation_id: Optional[str] = N
 
         data = response.json()
         logger.info(
-            f"Hindsight returned {len(data.get('results', []))} memory fragments "
-            f"and {len(data.get('entities', {}))} linked entities"
+            f"Hindsight returned {len(data.get('results') or [])} memory fragments "
+            f"and {len(data.get('entities') or {})} linked entities"
         )
         return data
 
@@ -376,8 +378,8 @@ def format_context_prompt(
       3. User's actual question
     """
     # Extract and format memory fragments
-    memories = hindsight_context.get("results", [])
-    entities_dict = hindsight_context.get("entities", {})
+    memories = hindsight_context.get("results") or []
+    entities_dict = hindsight_context.get("entities") or {}
 
     context_blocks = []
 
@@ -693,7 +695,7 @@ async def chat(request: ChatRequest):
                 # ── Step 4: Commit the Q&A pair to Hindsight for future context ──
                 try:
                     await http_client.post(
-                        f"{HINDSIGHT_BASE_URL}/v1/default/banks/{conversation_id}/memories",
+                        f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/memories",
                         json={
                             "items": [{
                                 "content": f"Q: {request.query}\nA: {full_response}",
@@ -701,6 +703,7 @@ async def chat(request: ChatRequest):
                                     "type": "conversation",
                                     "timestamp": datetime.now(timezone.utc).isoformat(),
                                     "source": "chat",
+                                    "conversation_id": conversation_id,
                                 }
                             }]
                         },
@@ -798,16 +801,16 @@ async def chat(request: ChatRequest):
                                 yield f"data: {json.dumps({'type': 'thought', 'content': f'Using search_engineering_graph with query: {q}'})}\n\n"
                                 
                                 context_data = await query_hindsight_context(q, conversation_id)
-                                memories = context_data.get("memories", [])
-                                entities = context_data.get("entities", [])
+                                memories = context_data.get("results") or []
+                                entities_dict = context_data.get("entities") or {}
                                 
                                 result_blocks = []
                                 if memories:
                                     for i, m in enumerate(memories, 1):
-                                        result_blocks.append(f"[Score: {m.get('relevance_score', 0):.2f}] {m.get('content', '')}")
-                                if entities:
-                                    for e in entities:
-                                        result_blocks.append(f"[Entity: {e.get('name')}] {e.get('description', '')}")
+                                        result_blocks.append(f"[Score: {m.get('relevance_score', 0):.2f}] {m.get('text', '')}")
+                                if entities_dict:
+                                    for k, v in entities_dict.items():
+                                        result_blocks.append(f"[Entity: {k}] {v}")
                                 
                                 content_str = "\\n".join(result_blocks) if result_blocks else "No relevant context found."
                                 
@@ -830,7 +833,7 @@ async def chat(request: ChatRequest):
                             
                         try:
                             await http_client.post(
-                                f"{HINDSIGHT_BASE_URL}/v1/default/banks/{conversation_id}/memories",
+                                f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/memories",
                                 json={
                                     "items": [{
                                         "content": f"Q: {request.query}\\nA: {full_response}",
@@ -838,6 +841,7 @@ async def chat(request: ChatRequest):
                                             "type": "conversation",
                                             "timestamp": datetime.now(timezone.utc).isoformat(),
                                             "source": "agent",
+                                            "conversation_id": conversation_id,
                                         }
                                     }]
                                 },
@@ -1016,7 +1020,7 @@ async def get_machine(machine_id: str, db: AsyncSession = Depends(get_db)):
     
     # Query Hindsight for actual machine entities
     res = await query_hindsight_context(f"components and parts for {machine.name}")
-    entities_dict = res.get("entities", {})
+    entities_dict = res.get("entities") or {}
     entities = [{"id": k, "name": k} for k in entities_dict.keys()]
     
     import math
@@ -1114,8 +1118,8 @@ async def get_global_knowledge_graph(db: AsyncSession = Depends(get_db)):
 
     # 2. Query Hindsight (Temporal Memory)
     res = await query_hindsight_context("machine component system failure maintenance document field report log", top_k=20)
-    memories = res.get("results", [])
-    entities_dict = res.get("entities", {})
+    memories = res.get("results") or []
+    entities_dict = res.get("entities") or {}
     
     valid_entities = [{"id": k, "name": k, "data": v} for k, v in entities_dict.items()]
     valid_memories = [m for m in memories if m.get("text")]

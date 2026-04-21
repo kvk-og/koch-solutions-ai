@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import AppShell from "@/components/AppShell";
+import { LayoutWrapper } from "@/components/LayoutWrapper";
 import { GlobalProvider } from "@/store/GlobalContext";
 export const metadata: Metadata = {
   title: "KOCH Solutions — Engineering Intelligence Platform",
@@ -18,9 +18,9 @@ export default function RootLayout({
     <html lang="en">
       <body className="min-h-screen bg-background antialiased">
         <GlobalProvider>
-          <AppShell>
+          <LayoutWrapper>
             {children}
-          </AppShell>
+          </LayoutWrapper>
         </GlobalProvider>
       </body>
     </html>
