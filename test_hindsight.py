@@ -5,7 +5,7 @@ import json
 async def run():
     async with httpx.AsyncClient() as client:
         # We try to get the entities using the recall endpoint first
-        res = await client.post("http://localhost:8100/v1/recall", json={
+        res = await client.post("http://localhost:8888/v1/default/banks/koch_graph/memories/recall", json={
             "query": "components machine",
             "top_k": 5,
             "include_entities": True

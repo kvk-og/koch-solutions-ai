@@ -12,7 +12,7 @@
 └─────────────┘     │              │     └─────────────┘
                     │              │────▶│  Hindsight  │
                     │              │     │  (Memory)   │
-                    │              │     │  :8100      │
+                    │              │     │  :8888      │
                     └──────────────┘     └─────────────┘
                            │
                     ┌──────────────┐
@@ -42,7 +42,7 @@ open http://localhost:3000
 |---------|------|-------------|
 | **Frontend** | 3000 | Next.js Chat UI (App Router, Tailwind, TypeScript) |
 | **Backend API** | 8000 | FastAPI orchestrator — routes queries and files |
-| **Hindsight** | 8100 | Temporal memory graph (vector + entity storage) |
+| **Hindsight** | 8888 | Temporal memory graph (vector + entity storage) |
 | **Workers** | 9000 | Document ingestion pipeline (Docling + VLM) |
 
 ## Key Endpoints

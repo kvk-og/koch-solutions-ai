@@ -86,12 +86,19 @@ services:
     environment:
       - HINDSIGHT_API_KEY=${HINDSIGHT_API_KEY:-koch-hindsight-key}
       - HINDSIGHT_STORAGE_DIR=/data
-      - HINDSIGHT_API_LLM_API_KEY=${VLLM_API_KEY}
-      - HINDSIGHT_API_LLM_BASE_URL=${VLLM_BASE_URL}
-      - HINDSIGHT_API_LLM_PROVIDER=openai
-      - HINDSIGHT_API_LLM_MODEL=${LLM_MODEL}
-      - HINDSIGHT_LLM_MODEL=${LLM_MODEL}
-      - LLM_MODEL=${LLM_MODEL}
+      - HINDSIGHT_API_LLM_API_KEY=${LM_API_TOKEN:-${GEMINI_API_KEY}}
+      - HINDSIGHT_API_LLM_BASE_URL=${LLM_BASE_URL:-http://llm-proxy/v1beta/openai}
+      - HINDSIGHT_API_LLM_PROVIDER=lmstudio
+      - HINDSIGHT_API_LLM_MODEL=${LLM_MODEL:-gemini-3.1-flash-lite-preview}
+      - HINDSIGHT_LLM_MODEL=${LLM_MODEL:-gemini-3.1-flash-lite-preview}
+      - LLM_MODEL=${LLM_MODEL:-gemini-3.1-flash-lite-preview}
+      # Local hardware configuration (optimized for 96GB VRAM)
+      - HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=4
+      - HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT=4
+      - HINDSIGHT_API_LLM_MAX_CONCURRENT=8
+      - HINDSIGHT_API_RETAIN_LLM_INITIAL_BACKOFF=3.0
+      - HINDSIGHT_API_RETAIN_LLM_MAX_BACKOFF=120.0
+      - HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=6
     env_file:
       - .env
     volumes:
@@ -102,6 +109,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+#    devices:
+#      - /dev/kfd:/dev/kfd
+#      - /dev/dri:/dev/dri
+#    group_add:
+#      - video
 
   # =========================================================================
   # 3. Backend API — FastAPI Orchestrator
@@ -121,7 +133,9 @@ services:
     environment:
       # Service discovery — containers resolve each other by service name
       - HINDSIGHT_BASE_URL=http://hindsight:8888
-      - VLLM_BASE_URL=${VLLM_BASE_URL}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://llm-proxy/v1beta/openai}
+      - GEMINI_API_KEY=${LM_API_TOKEN:-${GEMINI_API_KEY}}
+      - LLM_MODEL=${LLM_MODEL:-gemini-3.1-flash-lite-preview}
       - WORKER_BASE_URL=http://parser-workers:9000
     depends_on:
       llm-proxy:
@@ -195,7 +209,9 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - HINDSIGHT_BASE_URL=http://hindsight:8888
-      - VLLM_BASE_URL=${VLLM_BASE_URL}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://llm-proxy/v1beta/openai}
+      - GEMINI_API_KEY=${LM_API_TOKEN:-${GEMINI_API_KEY}}
+      - LLM_MODEL=${LLM_MODEL:-gemini-3.1-flash-lite-preview}
     depends_on:
       llm-proxy:
         condition: service_started
@@ -215,13 +231,16 @@ services:
       dockerfile: Dockerfile
     container_name: koch-workers
     restart: unless-stopped
+    shm_size: '2gb'
     networks:
       - koch-internal
     env_file:
       - .env
     environment:
       - HINDSIGHT_BASE_URL=http://hindsight:8888
-      - VLLM_BASE_URL=${VLLM_BASE_URL}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://llm-proxy/v1beta/openai}
+      - GEMINI_API_KEY=${LM_API_TOKEN:-${GEMINI_API_KEY}}
+      - LLM_MODEL=${LLM_MODEL:-gemini-3.1-flash-lite-preview}
     depends_on:
       llm-proxy:
         condition: service_started
@@ -230,6 +249,11 @@ services:
     volumes:
       - ./workers:/app
       - /app/__pycache__
+#    devices:
+#      - /dev/kfd:/dev/kfd
+#      - /dev/dri:/dev/dri
+#    group_add:
+#      - video
 
   # =========================================================================
   # 6. CAD Parser Workers — Autodesk Inventor Ingestion Pipeline
@@ -237,17 +261,18 @@ services:
   cad-workers:
     build:
       context: ./workers
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.cad
     container_name: koch-cad-workers
     restart: unless-stopped
-    command: ["uvicorn", "cad_processor:app", "--host", "0.0.0.0", "--port", "9001", "--reload"]
     networks:
       - koch-internal
     env_file:
       - .env
     environment:
       - HINDSIGHT_BASE_URL=http://hindsight:8888
-      - VLLM_BASE_URL=${VLLM_BASE_URL}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://llm-proxy/v1beta/openai}
+      - GEMINI_API_KEY=${LM_API_TOKEN:-${GEMINI_API_KEY}}
+      - LLM_MODEL=${LLM_MODEL:-gemini-3.1-flash-lite-preview}
     depends_on:
       llm-proxy:
         condition: service_started

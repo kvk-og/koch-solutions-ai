@@ -16,11 +16,13 @@ from celery import Celery
 # Redis broker URL
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
-HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://hindsight:8100")
+HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://hindsight:8888")
 HINDSIGHT_API_KEY = os.getenv("HINDSIGHT_API_KEY", "koch-hindsight-key")
-VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "https://api.ingham.ai/v1")
-VLLM_API_KEY = os.getenv("VLLM_API_KEY", "inghamai-8101997")
-LLM_MODEL = os.getenv("LLM_MODEL", "google/gemma-4-26B-A4B-it")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+LLM_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("LLM_API_KEY")
+if not LLM_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY environment variable is required.")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-3.1-flash-lite-preview")
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -39,6 +41,17 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
 )
+
+# Module-level Gemini client singleton — shared across Celery worker threads
+_llm_client = None
+
+def get_llm_client():
+    """Return the module-level OpenAI/Gemini client, creating it on first use."""
+    global _llm_client
+    if _llm_client is None:
+        from openai import OpenAI
+        _llm_client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+    return _llm_client
 
 # =============================================================================
 # Pipeline Components
@@ -83,19 +96,24 @@ def extract_exif_metadata(filepath: str) -> dict:
 
 def analyze_image_content(filepath: str) -> str:
     """
-    Pass the image to the local VLM (e.g., LLaVA or a Vision-capable LLM)
-    to generate a descriptive text summary of physical damage or machine state.
+    Pass the image to the Gemini vision model to generate a descriptive
+    text summary of physical damage or machine state.
     """
     import base64
-    from openai import OpenAI
-    
-    logger.info(f"Sending visual query to VLM for {filepath}...")
-    
+
+    logger.info(f"Sending visual query to Gemini for {filepath}...")
+
     try:
         with open(filepath, "rb") as image_file:
             encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-            
-        client = OpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
+
+        # Detect MIME type from extension
+        ext = os.path.splitext(filepath)[1].lower().lstrip(".")
+        mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                    "webp": "image/webp", "bmp": "image/bmp"}
+        mime_type = mime_map.get(ext, "image/jpeg")
+
+        client = get_llm_client()
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
@@ -107,7 +125,7 @@ def analyze_image_content(filepath: str) -> str:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "What do you see in this field photo?"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded_string}"}}
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded_string}"}}
                     ]
                 }
             ],
@@ -116,8 +134,8 @@ def analyze_image_content(filepath: str) -> str:
         )
         return response.choices[0].message.content
     except Exception as e:
-        logger.error(f"VLM Analysis Failed: {e}")
-        return f"VLM Analysis Failed: {str(e)}"
+        logger.error(f"Gemini Vision Analysis Failed: {e}")
+        return f"Gemini Vision Analysis Failed: {str(e)}"
 
 
 def create_visual_field_report(filepath: str, machine_id: str) -> dict:
@@ -130,7 +148,7 @@ def create_visual_field_report(filepath: str, machine_id: str) -> dict:
     
     report_content = (
         f"📋 **Visual Field Report: {machine_id}**\n\n"
-        f"**AI Diagnostics (VLM Analysis):**\n{vlm_summary}\n\n"
+        f"**AI Diagnostics (Gemini Vision Analysis):**\n{vlm_summary}\n\n"
         f"**Photo Metadata:**\n"
     )
     

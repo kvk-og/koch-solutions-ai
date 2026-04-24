@@ -27,6 +27,7 @@ export default function WorkspaceHub() {
   const [query, setQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [conversationId, setConversationId] = useState<string | null>(null);
 
   const [mode, setMode] = useState<"chat"|"agent">("chat");
 
@@ -51,7 +52,7 @@ export default function WorkspaceHub() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: userMessage.text, mode: mode })
+        body: JSON.stringify({ query: userMessage.text, mode: mode, conversation_id: conversationId })
       });
 
       if (!res.body) throw new Error("No response body");
@@ -74,15 +75,19 @@ export default function WorkspaceHub() {
             if (dataStr === "[DONE]") continue;
             try {
               const data = JSON.parse(dataStr);
+              // Capture conversation_id from the first event
+              if (data.conversation_id && !conversationId) {
+                setConversationId(data.conversation_id);
+              }
               if (data.content) {
                 // If it's a thought, format it gracefully.
                 const newText = data.type === 'thought' 
-                  ? `[Processing: ${data.content}]\\n` 
+                  ? '' // Suppress thought text from final output — they show as status
                   : data.content;
                 aiText += newText;
                 setChatHistory(prev => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: aiText } : msg));
               } else if (data.error) {
-                aiText += `\\n\\n[Error: ${data.error}]`;
+                aiText += `\n\n[Error: ${data.error}]`;
                 setChatHistory(prev => prev.map(msg => msg.id === aiMessageId ? { ...msg, text: aiText } : msg));
               }
             } catch (err) {

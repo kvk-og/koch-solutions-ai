@@ -27,7 +27,7 @@ from fastapi import FastAPI, Request, HTTPException
 # Configuration
 # =============================================================================
 
-HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://hindsight:8100")
+HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://hindsight:8888")
 HINDSIGHT_API_KEY = os.getenv("HINDSIGHT_API_KEY", "koch-hindsight-key")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -69,12 +69,13 @@ async def shutdown():
 async def commit_to_hindsight(
     content: str,
     metadata: dict,
-    namespace: str = "cad_models",
+    namespace: str = "koch_graph",
 ) -> dict:
     payload = {
         "items": [{
             "content": content,
             "metadata": {
+                "page": "",
                 **metadata,
                 "ingested_at": datetime.now(timezone.utc).isoformat(),
                 "content_hash": f"sha256:{hashlib.sha256(content.encode()).hexdigest()[:16]}",
@@ -84,7 +85,7 @@ async def commit_to_hindsight(
 
     try:
         response = await http_client.post(
-            f"{HINDSIGHT_BASE_URL}/v1/default/banks/{namespace}/memories",
+            f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/memories",
             json=payload,
             headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
         )
@@ -198,7 +199,7 @@ async def ingest_cad(request: Request):
             result = await commit_to_hindsight(
                 content=chunk["content"],
                 metadata={**chunk["metadata"], "file_id": file_id},
-                namespace="cad_models",
+                namespace="koch_graph",
             )
             committed.append(result)
         except Exception as e:

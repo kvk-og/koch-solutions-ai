@@ -35,6 +35,6 @@ export const config = {
      *         it's a frontend middleware it only intercepts frontend routes.
      *         Actually, Next.js handles `/api/*` so it intercepts them too. Let's allow public assets.)
      */
-    '/((?!_next/static|_next/image|favicon.ico).*)',
+    '/((?!_next/static|_next/image|favicon.ico|api/).*)',
   ],
 }

@@ -51,7 +51,7 @@ fi
 
 # Run logic
 if [ "$1" == "--background" ]; then
-    nohup python3 -m uvicorn workers.pipeline:app --host 0.0.0.0 --port 9000 > native-worker.log 2>&1 &
+    nohup python3 -m uvicorn pipeline:app --host 0.0.0.0 --port 9000 --app-dir workers > native-worker.log 2>&1 &
     echo "=== Stack Successfully Deployed ==="
     echo "Docker containers are running in the background."
     echo "Native worker is running in the background. Logs are in native-worker.log."
@@ -69,5 +69,5 @@ else
     echo "=== Stack Successfully Deployed ==="
     echo "Access the application at http://localhost"
     echo "Press Ctrl+C to gracefully stop everything (this terminal will stream the native worker logs)."
-    python3 -m uvicorn workers.pipeline:app --host 0.0.0.0 --port 9000
+    python3 -m uvicorn pipeline:app --host 0.0.0.0 --port 9000 --app-dir workers
 fi

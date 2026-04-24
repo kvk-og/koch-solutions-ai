@@ -20,6 +20,7 @@ import os
 import json
 import uuid
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -37,11 +38,18 @@ import shutil
 # =============================================================================
 
 # Service URLs — resolved via Docker DNS on the internal network
-VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "https://api.ingham.ai/v1")
-VLLM_API_KEY = os.getenv("VLLM_API_KEY", "inghamai-8101997")
-LLM_MODEL = os.getenv("LLM_MODEL", "google/gemma-4-26B-A4B-it")
+# Internal services call the llm-proxy which forwards to Gemini.
+# Outside Docker (local dev), fall back to the public Gemini endpoint.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+LLM_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("LLM_API_KEY")
+if not LLM_API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY environment variable is required. "
+        "Get yours at https://aistudio.google.com/app/apikey"
+    )
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-3.1-flash-lite-preview")
 
-HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://hindsight:8100")
+HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://hindsight:8888")
 HINDSIGHT_API_KEY = os.getenv("HINDSIGHT_API_KEY", "koch-hindsight-key")
 
 WORKER_BASE_URL = os.getenv("WORKER_BASE_URL", "http://parser-workers:9000")
@@ -88,6 +96,65 @@ class TelemetryTracker:
 telemetry_tracker = TelemetryTracker()
 
 # =============================================================================
+# Database imports and lifespan (must be defined before app instantiation)
+# =============================================================================
+
+from database import init_db, get_db, AsyncSessionLocal
+import seed
+import models
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from fastapi import Depends
+
+# OpenAI-compatible client pointed at the Gemini API (via internal llm-proxy)
+llm_client: Optional[AsyncOpenAI] = None
+
+# General HTTP client for Hindsight and Worker communication
+http_client: Optional[httpx.AsyncClient] = None
+
+# Celery application for dispatching background tasks
+celery_app = celery.Celery("backend_client", broker=REDIS_URL)
+
+# In-memory conversation history store (conversation_id -> list of {role, content})
+# In production, this should be backed by Redis or a database.
+from collections import defaultdict
+conversation_histories: dict[str, list[dict]] = defaultdict(list)
+MAX_CONVERSATION_TURNS = 20  # Keep last N exchanges to avoid context overflow
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan — initialises Gemini + HTTP clients on start, tears down on stop."""
+    global llm_client, http_client
+
+    await init_db()
+    async with AsyncSessionLocal() as session:
+        await seed.seed_data_if_empty(session)
+
+    llm_client = AsyncOpenAI(
+        base_url=LLM_BASE_URL,
+        api_key=LLM_API_KEY,
+    )
+
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(60.0, connect=10.0),
+        headers={"Content-Type": "application/json"},
+    )
+
+    logger.info("KOCH AI Backend started — Gemini clients initialised")
+    logger.info(f"  Gemini endpoint:     {LLM_BASE_URL}")
+    logger.info(f"  Model:               {LLM_MODEL}")
+    logger.info(f"  Hindsight endpoint:  {HINDSIGHT_BASE_URL}")
+    logger.info(f"  Worker endpoint:     {WORKER_BASE_URL}")
+    logger.info(f"  CAD Worker endpoint: {CAD_WORKER_BASE_URL}")
+
+    yield  # Application runs here
+
+    if http_client:
+        await http_client.aclose()
+    logger.info("KOCH AI Backend shut down cleanly")
+
+# =============================================================================
 
 app = FastAPI(
     title="KOCH AI — Engineering Intelligence API",
@@ -95,6 +162,7 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # CORS — restrict to frontend origin in production
@@ -125,61 +193,6 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"detail": "Service is currently unavailable. Please try again later."},
     )
 
-# =============================================================================
-# Async HTTP Clients (initialized on startup, closed on shutdown)
-# =============================================================================
-
-# OpenAI-compatible client pointed at the vLLM container
-vllm_client: Optional[AsyncOpenAI] = None
-
-# General HTTP client for Hindsight and Worker communication
-http_client: Optional[httpx.AsyncClient] = None
-
-# Celery application for dispatching background tasks
-celery_app = celery.Celery("backend_client", broker=REDIS_URL)
-
-
-
-from database import init_db, get_db, AsyncSessionLocal
-import seed
-import models
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from fastapi import Depends
-
-@app.on_event("startup")
-async def startup():
-    """Initialize async clients on application startup."""
-    global vllm_client, http_client
-
-    await init_db()
-    async with AsyncSessionLocal() as session:
-        await seed.seed_data_if_empty(session)
-
-    vllm_client = AsyncOpenAI(
-        base_url=VLLM_BASE_URL,
-        api_key=VLLM_API_KEY,
-    )
-
-    http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(60.0, connect=10.0),
-        headers={"Content-Type": "application/json"},
-    )
-
-    logger.info("KOCH AI Backend started — all clients initialized")
-    logger.info(f"  vLLM endpoint:      {VLLM_BASE_URL}")
-    logger.info(f"  Hindsight endpoint:  {HINDSIGHT_BASE_URL}")
-    logger.info(f"  Worker endpoint:     {WORKER_BASE_URL}")
-    logger.info(f"  CAD Worker endpoint: {CAD_WORKER_BASE_URL}")
-
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    """Gracefully close all clients."""
-    if http_client:
-        await http_client.aclose()
-    logger.info("KOCH AI Backend shut down cleanly")
 
 
 # =============================================================================
@@ -367,15 +380,17 @@ async def query_hindsight_context(query: str, conversation_id: Optional[str] = N
 def format_context_prompt(
     user_query: str,
     hindsight_context: dict,
+    conversation_id: Optional[str] = None,
 ) -> list[dict]:
     """
-    Format the system prompt + retrieved context + user query into the
-    message array expected by the OpenAI-compatible vLLM API.
+    Format the system prompt + retrieved context + conversation history +
+    user query into the message array expected by the OpenAI-compatible API.
 
     The prompt structure follows enterprise RAG best practices:
       1. System prompt defining the AI's role and constraints
       2. Retrieved context from the memory graph
-      3. User's actual question
+      3. Prior conversation turns (multi-turn awareness)
+      4. User's actual question
     """
     # Extract and format memory fragments
     memories = hindsight_context.get("results") or []
@@ -388,10 +403,25 @@ def format_context_prompt(
         context_blocks.append("=== RETRIEVED ENGINEERING CONTEXT ===")
         for i, mem in enumerate(memories, 1):
             timestamp = mem.get("occurred_start", "unknown")
-            source = mem.get("type", "unknown")
+            fact_type = mem.get("type", "unknown")
             content = mem.get("text", "")
+            context_label = mem.get("context", "")
+            metadata = mem.get("metadata") or {}
+            source_file = metadata.get("source", "")
+            entities = mem.get("entities") or []
+            
+            header_parts = [f"type: {fact_type}"]
+            if timestamp and timestamp != "unknown":
+                header_parts.append(f"date: {timestamp}")
+            if context_label:
+                header_parts.append(f"context: {context_label}")
+            if source_file:
+                header_parts.append(f"source: {source_file}")
+            if entities:
+                header_parts.append(f"entities: {', '.join(entities)}")
+            
             context_blocks.append(
-                f"[Memory {i}] (type: {source}, date: {timestamp})\n{content}"
+                f"[Memory {i}] ({', '.join(header_parts)})\n{content}"
             )
 
     # Format linked entities (equipment, systems, standards)
@@ -423,11 +453,17 @@ def format_context_prompt(
                 f"CONTEXT:\n{context_str}"
             ),
         },
-        {
-            "role": "user",
-            "content": user_query,
-        },
     ]
+
+    # Inject prior conversation turns for multi-turn awareness
+    if conversation_id and conversation_id in conversation_histories:
+        prior_turns = conversation_histories[conversation_id][-MAX_CONVERSATION_TURNS:]
+        messages.extend(prior_turns)
+
+    messages.append({
+        "role": "user",
+        "content": user_query,
+    })
 
     return messages
 
@@ -444,15 +480,14 @@ async def health_check():
     """
     deps = {}
 
-    # Check AI API Endpoint
+    # Check Gemini API (via llm-proxy)
     try:
         resp = await http_client.get(
-            f"{VLLM_BASE_URL}/models",
-            headers={"Authorization": f"Bearer {VLLM_API_KEY}"}
+            f"http://llm-proxy/v1beta/models?key={LLM_API_KEY}"
         )
-        deps["ai_api"] = "healthy" if resp.status_code == 200 else f"unhealthy ({resp.status_code})"
+        deps["gemini"] = "healthy" if resp.status_code == 200 else f"unhealthy ({resp.status_code})"
     except Exception:
-        deps["ai_api"] = "unreachable"
+        deps["gemini"] = "unreachable"
 
     # Check Hindsight
     try:
@@ -651,27 +686,81 @@ async def chat(request: ChatRequest):
     )
 
     if request.mode == "chat":
-        # ── Route A: Fast Chat (Direct RAG) ──
-        # ── Step 1: Retrieve context from Hindsight memory graph ──
-        hindsight_context = await query_hindsight_context(
-            query=request.query,
-            conversation_id=conversation_id,
-        )
+        # ── Route A: Hindsight Reflect (Agentic Memory Reasoning) ──
+        # Reflect runs an autonomous agentic loop: searches the memory bank,
+        # applies the bank's disposition/directives, and produces a grounded
+        # response. Falls back to manual Recall+Gemini if Reflect fails.
 
-        # ── Step 2: Format the prompt with context ──
-        messages = format_context_prompt(request.query, hindsight_context)
-
-        # ── Step 3: Stream inference from vLLM ──
         async def generate_stream():
-            """
-            Async generator that streams tokens from vLLM and wraps them
-            in Server-Sent Events format for the frontend.
-            """
             full_response = ""
 
             try:
-                # Create a streaming completion using the OpenAI-compatible API
-                stream = await vllm_client.chat.completions.create(
+                # ── Primary path: Hindsight Reflect ──
+                # Per https://hindsight.vectorize.io/developer/api/reflect
+                yield f"data: {json.dumps({'type': 'thought', 'content': 'Searching engineering memory...', 'conversation_id': conversation_id})}\n\n"
+
+                reflect_response = await http_client.post(
+                    f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/reflect",
+                    json={
+                        "query": request.query,
+                        "budget": "mid",
+                        "max_tokens": request.max_tokens or 4096,
+                        "include": {"facts": {}},
+                    },
+                    headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
+                    timeout=httpx.Timeout(120.0),
+                )
+                reflect_response.raise_for_status()
+                reflect_data = reflect_response.json()
+
+                # Extract the synthesized response
+                full_response = reflect_data.get("text", "")
+
+                if not full_response:
+                    raise ValueError("Reflect returned empty response, falling back to Recall+LLM")
+
+                logger.info(
+                    f"Reflect success: conv={conversation_id}, "
+                    f"response_len={len(full_response)}, "
+                    f"sources={len((reflect_data.get('based_on') or {}).get('memories', []))}"
+                )
+
+                # Stream the Reflect response to the frontend in chunks
+                import asyncio
+                chunk_size = 15
+                for i in range(0, len(full_response), chunk_size):
+                    token = full_response[i:i+chunk_size]
+                    event_data = json.dumps({
+                        "type": "token",
+                        "content": token,
+                        "conversation_id": conversation_id,
+                    })
+                    yield f"data: {event_data}\n\n"
+                    await asyncio.sleep(0.01)
+
+                # Append citation sources if available
+                based_on = reflect_data.get("based_on") or {}
+                source_memories = based_on.get("memories", [])
+                if source_memories:
+                    sources_text = "\n\n---\n**Sources:**\n"
+                    for mem in source_memories[:5]:
+                        src = (mem.get("metadata") or {}).get("source", mem.get("context", "memory"))
+                        sources_text += f"- [{mem.get('type', 'fact')}] {src}: {mem.get('text', '')[:100]}...\n"
+                    full_response += sources_text
+                    yield f"data: {json.dumps({'type': 'token', 'content': sources_text, 'conversation_id': conversation_id})}\n\n"
+
+            except Exception as reflect_err:
+                logger.warning(f"Reflect failed ({reflect_err}), falling back to Recall+LLM")
+                yield f"data: {json.dumps({'type': 'thought', 'content': 'Analyzing context...', 'conversation_id': conversation_id})}\n\n"
+
+                # ── Fallback: manual Recall → Prompt → Gemini ──
+                hindsight_context = await query_hindsight_context(
+                    query=request.query,
+                    conversation_id=conversation_id,
+                )
+                messages = format_context_prompt(request.query, hindsight_context, conversation_id=conversation_id)
+
+                stream = await llm_client.chat.completions.create(
                     model=LLM_MODEL,
                     messages=messages,
                     max_completion_tokens=request.max_tokens,
@@ -683,8 +772,6 @@ async def chat(request: ChatRequest):
                     if chunk.choices and chunk.choices[0].delta.content:
                         token = chunk.choices[0].delta.content
                         full_response += token
-
-                        # Emit each token as an SSE event
                         event_data = json.dumps({
                             "type": "token",
                             "content": token,
@@ -692,42 +779,38 @@ async def chat(request: ChatRequest):
                         })
                         yield f"data: {event_data}\n\n"
 
-                # ── Step 4: Commit the Q&A pair to Hindsight for future context ──
-                try:
-                    await http_client.post(
-                        f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/memories",
-                        json={
-                            "items": [{
-                                "content": f"Q: {request.query}\nA: {full_response}",
-                                "metadata": {
-                                    "type": "conversation",
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                                    "source": "chat",
-                                    "conversation_id": conversation_id,
-                                }
-                            }]
-                        },
-                        headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to commit conversation to Hindsight: {e}")
-
-                # Send completion event
-                done_data = json.dumps({
-                    "type": "done",
-                    "conversation_id": conversation_id,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-                yield f"data: {done_data}\n\n"
-
+            # ── Commit Q&A to Hindsight for future context ──
+            try:
+                await http_client.post(
+                    f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/memories",
+                    json={
+                        "items": [{
+                            "content": f"User ({datetime.now(timezone.utc).isoformat()}): {request.query}\nKOCH AI ({datetime.now(timezone.utc).isoformat()}): {full_response}",
+                            "document_id": f"chat-{conversation_id}",
+                            "update_mode": "append",
+                            "context": "engineering chat conversation",
+                            "metadata": {
+                                "source": "chat",
+                                "conversation_id": conversation_id,
+                            }
+                        }]
+                    },
+                    headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
+                )
             except Exception as e:
-                logger.error(f"vLLM streaming error: {e}")
-                error_data = json.dumps({
-                    "type": "error",
-                    "content": f"Inference error: {str(e)}",
-                    "conversation_id": conversation_id,
-                })
-                yield f"data: {error_data}\n\n"
+                logger.warning(f"Failed to commit conversation to Hindsight: {e}")
+
+            # Store Q&A pair in conversation history for multi-turn context
+            conversation_histories[conversation_id].append({"role": "user", "content": request.query})
+            conversation_histories[conversation_id].append({"role": "assistant", "content": full_response})
+
+            # Send completion event
+            done_data = json.dumps({
+                "type": "done",
+                "conversation_id": conversation_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            yield f"data: {done_data}\n\n"
 
         return StreamingResponse(
             generate_stream(),
@@ -783,12 +866,64 @@ async def chat(request: ChatRequest):
             
             try:
                 for turn in range(5):
-                    completion = await vllm_client.chat.completions.create(
-                        model=LLM_MODEL,
-                        messages=messages,
-                        tools=tools,
-                        temperature=request.temperature
-                    )
+                    try:
+                        completion = await llm_client.chat.completions.create(
+                            model=LLM_MODEL,
+                            messages=messages,
+                            tools=tools,
+                            temperature=request.temperature
+                        )
+                    except Exception as tool_err:
+                        # Some models don't support tool calling — retry without tools
+                        logger.warning(f"Tool-calling LLM request failed ({tool_err}), retrying without tools")
+                        completion = await llm_client.chat.completions.create(
+                            model=LLM_MODEL,
+                            messages=messages,
+                            temperature=request.temperature
+                        )
+                    
+                    if not completion.choices:
+                        # Model returned empty choices (likely doesn't support tools) — 
+                        # fall back to a simple RAG approach: query Hindsight, inject context, call without tools
+                        logger.warning("LLM returned empty choices with tools, falling back to RAG without tools")
+                        yield f"data: {json.dumps({'type': 'thought', 'content': 'Searching engineering memory...', 'conversation_id': conversation_id})}\n\n"
+                        
+                        context_data = await query_hindsight_context(request.query, conversation_id)
+                        memories = context_data.get("results") or []
+                        entities_dict = context_data.get("entities") or {}
+                        
+                        context_blocks = []
+                        for m in memories:
+                            context_blocks.append(m.get("text", ""))
+                        for k, v in entities_dict.items():
+                            context_blocks.append(f"[Entity: {k}] {v}")
+                        
+                        context_str = "\n".join(context_blocks) if context_blocks else "No relevant context found."
+                        
+                        messages.append({
+                            "role": "user",
+                            "content": f"Here is relevant engineering context from the knowledge graph:\n\n{context_str}\n\nNow answer my question: {request.query}"
+                        })
+                        
+                        completion = await llm_client.chat.completions.create(
+                            model=LLM_MODEL,
+                            messages=messages,
+                            temperature=request.temperature
+                        )
+                        
+                        if not completion.choices:
+                            yield f"data: {json.dumps({'type': 'error', 'content': 'LLM returned empty response.', 'conversation_id': conversation_id})}\n\n"
+                            break
+                        
+                        msg = completion.choices[0].message
+                        content = msg.content or ""
+                        for i in range(0, len(content), 10):
+                            token = content[i:i+10]
+                            full_response += token
+                            yield f"data: {json.dumps({'type': 'token', 'content': token, 'conversation_id': conversation_id})}\n\n"
+                            import asyncio
+                            await asyncio.sleep(0.01)
+                        break
                     
                     msg = completion.choices[0].message
                     
@@ -903,26 +1038,26 @@ async def list_conversations(
 @app.get("/api/cad/bom", tags=["Database"])
 async def get_cad_bom():
     res = await query_hindsight_context("CAD assembly BOM items")
-    memories = res.get("memories", [])
-    return [{"id": m.get("id"), "description": m.get("content")} for m in memories]
+    memories = res.get("results", [])
+    return [{"id": m.get("id"), "description": m.get("text")} for m in memories]
 
 @app.get("/api/cad/anomalies", tags=["Database"])
 async def get_cad_anomalies():
     res = await query_hindsight_context("CAD anomaly issues defects")
-    memories = res.get("memories", [])
-    return [{"id": m.get("id"), "description": m.get("content")} for m in memories]
+    memories = res.get("results", [])
+    return [{"id": m.get("id"), "description": m.get("text")} for m in memories]
 
 @app.get("/api/field-talk/threads", tags=["Database"])
 async def get_field_threads():
     res = await query_hindsight_context("field talk observations conversations")
-    memories = res.get("memories", [])
-    return [{"id": m.get("id"), "title": m.get("content")[:50]} for m in memories]
+    memories = res.get("results", [])
+    return [{"id": m.get("id"), "title": str(m.get("text", ""))[:50]} for m in memories]
 
 @app.get("/api/field-talk/threads/{thread_id}/messages", tags=["Database"])
 async def get_field_messages(thread_id: str):
-    res = await query_hindsight_context(f"messages for thread {thread_id}", namespace=thread_id)
-    memories = res.get("memories", [])
-    return [{"id": m.get("id"), "text": m.get("content")} for m in memories]
+    res = await query_hindsight_context(f"messages for thread {thread_id}")
+    memories = res.get("results", [])
+    return [{"id": m.get("id"), "text": m.get("text")} for m in memories]
 
 @app.post("/api/field-talk/messages", tags=["Database"])
 async def create_field_message(thread_id: str = Form(...), sender: str = Form(...), name: str = Form(...), text: str = Form(...)):
@@ -950,33 +1085,47 @@ async def create_field_message(thread_id: str = Form(...), sender: str = Form(..
 @app.get("/api/machine-books/manuals", tags=["Database"])
 async def get_manuals():
     res = await query_hindsight_context("machine manual documentation")
-    memories = res.get("memories", [])
-    return [{"id": m.get("id"), "content": m.get("content")} for m in memories]
+    memories = res.get("results", [])
+    return [{"id": m.get("id"), "content": m.get("text")} for m in memories]
 
 @app.get("/api/procurement/parts", tags=["Database"])
 async def get_procurement_parts():
     res = await query_hindsight_context("procurement parts inventory")
-    memories = res.get("memories", [])
-    return [{"id": m.get("id"), "part_info": m.get("content")} for m in memories]
+    memories = res.get("results", [])
+    return [{"id": m.get("id"), "part_info": m.get("text")} for m in memories]
+
+def get_system_load() -> int:
+    """Returns a 0-100 integer representing actual CPU/system load using /proc."""
+    try:
+        with open('/proc/loadavg', 'r') as f:
+            load1 = float(f.read().split()[0])
+        cores = os.cpu_count() or 1
+        cpu_load = min(100, int((load1 / cores) * 100))
+        return cpu_load
+    except Exception:
+        return 0
 
 @app.get("/api/telemetry/nodes", tags=["Database"])
 async def get_telemetry_nodes():
     nodes = []
-    # Test vLLM
+    base_load = get_system_load()
+    
+    # Test Gemini API (via llm-proxy)
     try:
         start = time.time()
-        resp = await http_client.get(f"{VLLM_BASE_URL}/models", headers={"Authorization": f"Bearer {VLLM_API_KEY}"})
+        resp = await http_client.get(f"http://llm-proxy/v1beta/models?key={LLM_API_KEY}")
         lat = int((time.time() - start) * 1000)
-        nodes.append({"id": "vllm-engine", "status": "online" if resp.status_code == 200 else "warning", "load": 40 if resp.status_code == 200 else 90, "latency": lat, "desc": "Local LLM Inference Engine"})
+        # LLM inference node typically takes heavier load; we add a small premium to base load
+        nodes.append({"id": "gemini-engine", "status": "online" if resp.status_code == 200 else "warning", "load": min(100, base_load + 20) if resp.status_code == 200 else 90, "latency": lat, "desc": "Gemini LLM (via llm-proxy)"})
     except Exception:
-        nodes.append({"id": "vllm-engine", "status": "offline", "load": 0, "latency": 0, "desc": "Local LLM Inference Engine"})
+        nodes.append({"id": "gemini-engine", "status": "offline", "load": 0, "latency": 0, "desc": "Gemini LLM (via llm-proxy)"})
         
     # Test Hindsight
     try:
         start = time.time()
         resp = await http_client.get(f"{HINDSIGHT_BASE_URL}/health")
         lat = int((time.time() - start) * 1000)
-        nodes.append({"id": "hindsight-memory", "status": "online" if resp.status_code == 200 else "warning", "load": 20, "latency": lat, "desc": "Temporal Knowledge Graph"})
+        nodes.append({"id": "hindsight-memory", "status": "online" if resp.status_code == 200 else "warning", "load": min(100, base_load + 5), "latency": lat, "desc": "Temporal Knowledge Graph"})
     except Exception:
         nodes.append({"id": "hindsight-memory", "status": "offline", "load": 0, "latency": 0, "desc": "Temporal Knowledge Graph"})
         
@@ -985,7 +1134,7 @@ async def get_telemetry_nodes():
         start = time.time()
         resp = await http_client.get(f"{WORKER_BASE_URL}/health")
         lat = int((time.time() - start) * 1000)
-        nodes.append({"id": "docling-workers", "status": "online" if resp.status_code == 200 else "warning", "load": 15, "latency": lat, "desc": "Document Parsing Pipeline"})
+        nodes.append({"id": "docling-workers", "status": "online" if resp.status_code == 200 else "warning", "load": min(100, base_load + 15), "latency": lat, "desc": "Document Parsing Pipeline"})
     except Exception:
         nodes.append({"id": "docling-workers", "status": "offline", "load": 0, "latency": 0, "desc": "Document Parsing Pipeline"})
         
@@ -994,7 +1143,7 @@ async def get_telemetry_nodes():
         start = time.time()
         resp = await http_client.get(f"{CAD_WORKER_BASE_URL}/health")
         lat = int((time.time() - start) * 1000)
-        nodes.append({"id": "cad-workers", "status": "online" if resp.status_code == 200 else "warning", "load": 25, "latency": lat, "desc": "CAD Ingestion Pipeline"})
+        nodes.append({"id": "cad-workers", "status": "online" if resp.status_code == 200 else "warning", "load": min(100, base_load + 10), "latency": lat, "desc": "CAD Ingestion Pipeline"})
     except Exception:
         nodes.append({"id": "cad-workers", "status": "offline", "load": 0, "latency": 0, "desc": "CAD Ingestion Pipeline"})
         
@@ -1002,8 +1151,11 @@ async def get_telemetry_nodes():
 
 @app.get("/api/telemetry/throughput", tags=["Database"])
 async def get_telemetry_throughput():
-    # Return actual tracked sparkline usage
-    return telemetry_tracker.get_data()
+    # Return actual tracked sparkline usage scaled to 0-100%
+    raw_data = telemetry_tracker.get_data()
+    max_val = max(raw_data) if max(raw_data) > 0 else 1
+    # Scale to percentage, ensuring a minimum baseline if traffic exists
+    return [int((val / max_val) * 100) if val > 0 else 0 for val in raw_data]
 
 @app.get("/api/machine/{machine_id}", tags=["Database"])
 async def get_machine(machine_id: str, db: AsyncSession = Depends(get_db)):

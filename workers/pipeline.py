@@ -45,11 +45,13 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 # Configuration
 # =============================================================================
 
-HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://hindsight:8100")
+HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "http://hindsight:8888")
 HINDSIGHT_API_KEY = os.getenv("HINDSIGHT_API_KEY", "koch-hindsight-key")
-VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "https://api.ingham.ai/v1")
-VLLM_API_KEY = os.getenv("VLLM_API_KEY", "inghamai-8101997")
-LLM_MODEL = os.getenv("LLM_MODEL", "google/gemma-4-26B-A4B-it")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai")
+LLM_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("LLM_API_KEY")
+if not LLM_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY environment variable is required.")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-3.1-flash-lite-preview")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("koch-workers")
@@ -75,8 +77,8 @@ async def startup():
         timeout=httpx.Timeout(120.0, connect=10.0),
         headers={"Content-Type": "application/json"},
     )
-    vllm_client = AsyncOpenAI(base_url=VLLM_BASE_URL, api_key=VLLM_API_KEY)
-    logger.info("Worker pipeline started")
+    vllm_client = AsyncOpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+    logger.info(f"Worker pipeline started — model: {LLM_MODEL}")
 
 
 @app.on_event("shutdown")
@@ -125,6 +127,7 @@ async def commit_to_hindsight(
         "items": [{
             "content": content,
             "metadata": {
+                "page": "",
                 **metadata,
                 "ingested_at": datetime.now(timezone.utc).isoformat(),
                 "content_hash": f"sha256:{hashlib.sha256(content.encode()).hexdigest()[:16]}",
@@ -202,29 +205,47 @@ async def parse_with_docling(file_bytes: bytes, filename: str) -> list[dict]:
             tmp_path = tmp.name
             
         try:
+            import asyncio
             converter = DocumentConverter()
-            result = converter.convert(tmp_path)
+            result = await asyncio.to_thread(converter.convert, tmp_path)
             doc = result.document
-        
-            parsed_chunks = []
-            for i, element in enumerate(doc.iterate_items()):
-                chunk = {
-                    "content": element.text,
-                    "metadata": {
+            
+            # ── PRIMARY APPROACH: Export the whole document as markdown ──
+            # This is the most reliable Docling 2.x API for full text extraction.
+            full_text = doc.export_to_markdown()
+            
+            if full_text and full_text.strip():
+                # Split into reasonable chunks (~2000 chars each) for Hindsight
+                chunk_size = 2000
+                text_chunks = []
+                for start in range(0, len(full_text), chunk_size):
+                    segment = full_text[start:start + chunk_size].strip()
+                    if segment:
+                        text_chunks.append(segment)
+                
+                parsed_chunks = []
+                for i, segment in enumerate(text_chunks):
+                    meta = {
                         "source": filename,
-                        "section": element.label if hasattr(element, 'label') else f"chunk_{i}",
-                        "page": element.prov[0].page_no if element.prov else None,
+                        "section": f"chunk_{i+1}_of_{len(text_chunks)}",
                         "document_type": "parsed",
                         "file_hash": file_hash,
                         "parser": "docling",
-                    },
-                }
-                parsed_chunks.append(chunk)
+                    }
+                    parsed_chunks.append({"content": segment, "metadata": meta})
+                    
+                logger.info(f"[DOCLING] Extracted {len(parsed_chunks)} chunks ({len(full_text)} chars total) from {filename}")
+            else:
+                logger.warning(f"[DOCLING] export_to_markdown() returned empty for {filename}")
+                parsed_chunks = [{
+                    "content": f"Document {filename} was parsed but contained no extractable text.",
+                    "metadata": {"source": filename, "status": "empty", "file_hash": file_hash, "parser": "docling"}
+                }]
         finally:
             os.unlink(tmp_path)
             
     except Exception as e:
-        logger.error(f"[DOCLING] parsing failed for {filename}: {e}")
+        logger.error(f"[DOCLING] parsing failed for {filename}: {e}", exc_info=True)
         parsed_chunks = [{
             "content": f"Failed to parse document {filename}",
             "metadata": {"source": filename, "status": "error", "file_hash": file_hash, "parser": "docling"}
@@ -268,6 +289,14 @@ async def extract_with_vlm(file_bytes: bytes, filename: str) -> list[dict]:
     # ── PRODUCTION IMPLEMENTATION ──
     try:
         import base64
+        # Detect MIME type from file extension for correct base64 data URI
+        ext = os.path.splitext(filename)[1].lower().lstrip(".")
+        mime_map = {
+            "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "png": "image/png", "tiff": "image/tiff", "tif": "image/tiff",
+            "bmp": "image/bmp", "webp": "image/webp", "svg": "image/svg+xml",
+        }
+        mime_type = mime_map.get(ext, "image/png")
         image_b64 = base64.b64encode(file_bytes).decode("utf-8")
         
         response = await vllm_client.chat.completions.create(
@@ -286,7 +315,7 @@ async def extract_with_vlm(file_bytes: bytes, filename: str) -> list[dict]:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": f"Analyze this engineering diagram: {filename}"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
                     ],
                 },
             ],
@@ -361,25 +390,76 @@ async def ingest_docling(request: Request):
     # Parse the document
     chunks = await parse_with_docling(file_bytes, filename)
 
-    # Commit each chunk to Hindsight memory
-    committed = []
-    for chunk in chunks:
+    # ── Commit to Hindsight using the proper Retain API ──
+    # Per https://hindsight.vectorize.io/developer/api/retain:
+    # - Each item.content is analyzed by Hindsight's LLM to extract facts
+    # - document_id makes retain idempotent (re-upload replaces old memories)
+    # - context shapes how facts are extracted
+    # - metadata provides provenance for filtering
+    committed = 0
+    if chunks:
+        # Hindsight handles its own chunking/fact extraction, so we should
+        # send larger content blocks rather than many tiny ones.
+        # Combine all parsed chunks into items, grouping into ~50k char blocks
+        # to stay within Hindsight's processing limits.
+        MAX_ITEM_CHARS = 50000
+        items = []
+        current_block = []
+        current_length = 0
+        
+        for chunk in chunks:
+            content = chunk["content"]
+            if current_length + len(content) > MAX_ITEM_CHARS and current_block:
+                items.append("\n\n".join(current_block))
+                current_block = []
+                current_length = 0
+            current_block.append(content)
+            current_length += len(content)
+        if current_block:
+            items.append("\n\n".join(current_block))
+        
+        # Build the retain request — one document_id per file for idempotency
+        retain_items = []
+        for i, block in enumerate(items):
+            item = {
+                "content": block,
+                "document_id": f"{file_id}" if len(items) == 1 else f"{file_id}-part{i+1}",
+                "context": "engineering document",
+                "metadata": {
+                    "source": filename,
+                    "file_id": file_id,
+                    "parser": "docling",
+                    "page": "",
+                    "ingested_at": datetime.now(timezone.utc).isoformat(),
+                },
+            }
+            retain_items.append(item)
+        
         try:
-            result = await commit_to_hindsight(
-                content=chunk["content"],
-                metadata={**chunk["metadata"], "file_id": file_id},
-                namespace="documents",
+            response = await http_client.post(
+                f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/memories",
+                json={"items": retain_items},
+                headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
+                timeout=httpx.Timeout(None),  # No timeout: Local LLM fact extraction takes time
             )
-            committed.append(result)
+            response.raise_for_status()
+            result = response.json()
+            committed = len(retain_items)
+            logger.info(
+                f"Hindsight retain success: {committed} items for {filename}, "
+                f"total_chars={sum(len(b) for b in items)}"
+            )
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Hindsight retain failed (HTTP {e.response.status_code}): {e.response.text[:500]}")
         except Exception as e:
-            logger.error(f"Failed to commit chunk to Hindsight: {e}")
+            logger.error(f"Hindsight retain error: {e}", exc_info=True)
 
     return {
         "file_id": file_id,
         "filename": filename,
         "pipeline": "docling",
         "chunks_parsed": len(chunks),
-        "chunks_committed": len(committed),
+        "items_retained": committed,
         "status": "complete",
     }
 

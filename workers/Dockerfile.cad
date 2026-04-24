@@ -1,5 +1,5 @@
 # =============================================================================
-# KOCH AI — Parser Workers (Docling & VLM Pipeline)
+# KOCH AI — CAD Workers (Lightweight binary extraction, no ML dependencies)
 # =============================================================================
 
 FROM python:3.11-slim AS base
@@ -12,21 +12,18 @@ WORKDIR /app
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
-        build-essential \
-        libgl1 \
-        libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Only install the minimal deps needed by cad_processor.py
+COPY cad_requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r cad_requirements.txt
 
-COPY . .
+COPY cad_processor.py .
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
-    CMD curl -f http://localhost:9000/health || exit 1
+    CMD curl -f http://localhost:9001/health || exit 1
 
-EXPOSE 9000
+EXPOSE 9001
 
-CMD ["uvicorn", "pipeline:app", "--host", "0.0.0.0", "--port", "9000", "--reload"]
+CMD ["uvicorn", "cad_processor:app", "--host", "0.0.0.0", "--port", "9001", "--reload"]
