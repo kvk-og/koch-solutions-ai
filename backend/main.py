@@ -1249,141 +1249,152 @@ async def get_machine(machine_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @app.get("/api/knowledge-graph", tags=["Database"])
-async def get_global_knowledge_graph(db: AsyncSession = Depends(get_db)):
+async def get_global_knowledge_graph():
     """
-    Constructs a global semantic network view by combining local relational data 
-    with Hindsight vector memories to ensure graph populations.
+    Proxies Hindsight's native /graph and /entities APIs, transforming the
+    response into a ReactFlow-compatible format with entity hub nodes and
+    memory fact nodes connected by semantic, temporal, and causal edges.
     """
-    import random
     import math
-    import uuid
-    
+
     nodes = []
     edges = []
-    
-    # 1. Fetch Local Data (Machines & Documents)
-    machines_res = await db.execute(select(models.Machine))
-    machines = machines_res.scalars().all()
-    
-    docs_res = await db.execute(select(models.VaultFile))
-    vault_files = docs_res.scalars().all()
+    entity_count = 0
+    memory_count = 0
 
-    # 2. Query Hindsight (Temporal Memory)
-    res = await query_hindsight_context("machine component system failure maintenance document field report log", top_k=20)
-    memories = res.get("results") or []
-    entities_dict = res.get("entities") or {}
-    
-    valid_entities = [{"id": k, "name": k, "data": v} for k, v in entities_dict.items()]
-    valid_memories = [m for m in memories if m.get("text")]
-    
-    # Cap total elements to 100 to prevent graph clutter processing
-    max_elements = 100
-    machines = machines[:max_elements]
-    docs_to_show = max_elements - len(machines)
-    vault_files = vault_files[:max(0, docs_to_show)]
-    entities_to_show = max_elements - (len(machines) + len(vault_files))
-    valid_entities = valid_entities[:max(0, entities_to_show)]
-    mem_to_show = max_elements - (len(machines) + len(vault_files) + len(valid_entities))
-    valid_memories = valid_memories[:max(0, mem_to_show)]
-    
-    # Total grid elements
-    total_elements = len(machines) + len(vault_files) + len(valid_entities) + len(valid_memories)
-    if total_elements == 0:
-        return {"nodes": [], "edges": [], "metrics": {"memories_count": 0, "entities_count": 0}}
-        
-    grid_size = math.ceil(math.sqrt(total_elements))
-    spacing = 250
-    offset_x = 100
-    offset_y = 100
-    
-    current_index = 0
-    machine_ids = []
-    
-    # Render Machines
-    for m in machines:
-        row = current_index // grid_size
-        col = current_index % grid_size
-        nodes.append({
-            "id": f"mch_{m.id}",
-            "position": {"x": col * spacing + offset_x + random.randint(-50,50), "y": row * spacing + offset_y + random.randint(-50,50)},
-            "data": {"label": m.name},
-            "style": {"background": "#1a2332", "color": "#00d4aa", "border": "2px solid #00d4aa", "borderRadius": "100px", "padding": "16px", "textAlign": "center", "fontWeight": "bold"}
-        })
-        machine_ids.append(f"mch_{m.id}")
-        current_index += 1
+    try:
+        # Fetch graph data and entities in parallel from Hindsight
+        graph_resp = await http_client.get(
+            f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/graph",
+            headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
+            timeout=15.0,
+        )
+        entities_resp = await http_client.get(
+            f"{HINDSIGHT_BASE_URL}/v1/default/banks/koch_graph/entities",
+            headers={"Authorization": f"Bearer {HINDSIGHT_API_KEY}"},
+            timeout=15.0,
+        )
 
-    # Render Vault Documents
-    for d in vault_files:
-        row = current_index // grid_size
-        col = current_index % grid_size
-        nodes.append({
-            "id": f"doc_{d.id}",
-            "position": {"x": col * spacing + offset_x + random.randint(-50,50), "y": row * spacing + offset_y + random.randint(-50,50)},
-            "data": {"label": d.filename[:30]},
-            "style": {"background": "#2d3748", "color": "#d9e2ec", "border": "1px solid #334e68", "borderRadius": "8px", "padding": "12px", "fontSize": "12px"}
-        })
-        # Randomly link document to a machine if any exist
-        if machine_ids:
-            edges.append({
-                "id": f"edge_doc_{d.id}",
-                "source": f"doc_{d.id}",
-                "target": random.choice(machine_ids),
-                "label": "RELATES_TO",
-                "animated": True,
-                "style": {"stroke": "#4b5563", "strokeWidth": 1.5},
-                "labelStyle": {"fill": "#a0aec0", "fontSize": 10}
+        graph_data = graph_resp.json() if graph_resp.status_code == 200 else {}
+        entities_data = entities_resp.json() if entities_resp.status_code == 200 else {}
+
+        hs_nodes = graph_data.get("nodes") or []
+        hs_edges = graph_data.get("edges") or []
+        hs_entities = (entities_data.get("items") or [])
+        entity_count = entities_data.get("total", len(hs_entities))
+
+        # De-duplicate self-loop edges and zero-weight edges
+        valid_edges = [
+            e for e in hs_edges
+            if e["data"]["source"] != e["data"]["target"] and e["data"].get("weight", 0) > 0.1
+        ]
+
+        # Build a set of memory node IDs present in the graph
+        memory_node_ids = {n["data"]["id"] for n in hs_nodes}
+        memory_count = len(memory_node_ids)
+
+        # ---- Layout: entities in center ring, memories in outer ring ----
+        center_x, center_y = 600, 500
+        entity_radius = 200
+        memory_radius = 500
+
+        # Create entity hub nodes (gold)
+        entity_id_map = {}
+        for i, ent in enumerate(hs_entities):
+            eid = f"ent_{ent['id']}"
+            angle = (2 * math.pi * i) / max(len(hs_entities), 1)
+            entity_id_map[ent["canonical_name"].lower()] = eid
+            nodes.append({
+                "id": eid,
+                "position": {
+                    "x": center_x + entity_radius * math.cos(angle),
+                    "y": center_y + entity_radius * math.sin(angle),
+                },
+                "data": {"label": ent["canonical_name"]},
+                "style": {
+                    "background": "#1a1500",
+                    "color": "#fbd38d",
+                    "border": "2px solid #d69e2e",
+                    "borderRadius": "100px",
+                    "padding": "14px 20px",
+                    "fontWeight": "bold",
+                    "fontSize": "13px",
+                    "textAlign": "center",
+                },
             })
-        current_index += 1
 
-    # Render Hindsight Entities
-    entity_ids = []
-    for ent in valid_entities:
-        row = current_index // grid_size
-        col = current_index % grid_size
-        nodes.append({
-            "id": ent.get("id"),
-            "position": {"x": col * spacing + offset_x + random.randint(-50,50), "y": row * spacing + offset_y + random.randint(-50,50)},
-            "data": {"label": ent.get("name", "Entity")[:40]},
-            "style": {"background": "#0f1419", "color": "#fbd38d", "border": "1px solid #d69e2e", "borderRadius": "8px", "padding": "12px"}
-        })
-        entity_ids.append(ent.get("id"))
-        current_index += 1
-        
-    # Render Hindsight Memories
-    for mem in valid_memories:
-        row = current_index // grid_size
-        col = current_index % grid_size
-        mem_id = mem.get("id", str(uuid.uuid4()))
-        nodes.append({
-            "id": mem_id,
-            "position": {"x": col * spacing + offset_x + random.randint(-50,50), "y": row * spacing + offset_y + random.randint(-50,50)},
-            "data": {"label": str(mem.get("text", "Memory"))[:35] + "..."},
-            "style": {"background": "#0f1419", "color": "#a0aec0", "border": "1px dashed #4b5563", "borderRadius": "8px", "padding": "10px", "fontSize": "11px"}
-        })
-        
-        # Connect memory to a random machine or entity
-        targets = machine_ids + entity_ids
-        if targets:
-            target_id = random.choice(targets)
-            edges.append({
-                "id": f"edge_{current_index}",
-                "source": mem_id,
-                "target": target_id,
-                "label": "CONTEXT_FOR",
-                "animated": False,
-                "style": {"stroke": "#4b5563", "strokeWidth": 1.0},
-                "labelStyle": {"fill": "#829ab1", "fontSize": 10}
+        # Create memory fact nodes (blue) and link them to their entities
+        for i, mn in enumerate(hs_nodes):
+            mid = mn["data"]["id"]
+            angle = (2 * math.pi * i) / max(len(hs_nodes), 1)
+            label_text = mn["data"].get("text", mn["data"].get("label", "Memory"))
+            # Truncate label for display
+            display_label = (label_text[:60] + "…") if len(label_text) > 60 else label_text
+
+            nodes.append({
+                "id": mid,
+                "position": {
+                    "x": center_x + memory_radius * math.cos(angle),
+                    "y": center_y + memory_radius * math.sin(angle),
+                },
+                "data": {"label": display_label},
+                "style": {
+                    "background": "#0d1b2a",
+                    "color": "#90cdf4",
+                    "border": "1px solid #2b6cb0",
+                    "borderRadius": "10px",
+                    "padding": "12px",
+                    "fontSize": "11px",
+                    "maxWidth": "260px",
+                },
             })
-            
-        current_index += 1
-        
+
+            # Link memory to its extracted entities
+            entity_str = mn["data"].get("entities", "")
+            if entity_str:
+                for ename in entity_str.split(", "):
+                    target_eid = entity_id_map.get(ename.strip().lower())
+                    if target_eid:
+                        edges.append({
+                            "id": f"me_{mid}_{target_eid}",
+                            "source": mid,
+                            "target": target_eid,
+                            "label": "MENTIONS",
+                            "animated": False,
+                            "style": {"stroke": "#d69e2e", "strokeWidth": 1.5, "opacity": 0.6},
+                            "labelStyle": {"fill": "#d69e2e", "fontSize": 9},
+                        })
+
+        # Map Hindsight edges (semantic / temporal / causal) between memories
+        edge_styles = {
+            "semantic": {"stroke": "#ff69b4", "strokeWidth": 2.0},
+            "temporal": {"stroke": "#00bcd4", "strokeWidth": 1.5, "strokeDasharray": "6 3"},
+            "causal":   {"stroke": "#ff7043", "strokeWidth": 2.0},
+        }
+        edge_labels = {"semantic": "SEM", "temporal": "TEMP", "causal": "CAUSE"}
+        for he in valid_edges:
+            d = he["data"]
+            link_type = d.get("linkType", "semantic")
+            edges.append({
+                "id": d["id"],
+                "source": d["source"],
+                "target": d["target"],
+                "label": edge_labels.get(link_type, link_type.upper()),
+                "animated": link_type == "semantic",
+                "style": edge_styles.get(link_type, {"stroke": "#4b5563", "strokeWidth": 1}),
+                "labelStyle": {"fill": d.get("color", "#a0aec0"), "fontSize": 9},
+            })
+
+    except Exception as e:
+        logger.warning(f"Failed to fetch Hindsight graph: {e}")
+
     return {
         "nodes": nodes,
         "edges": edges,
         "metrics": {
-            "memories_count": len(valid_memories) + len(vault_files),
-            "entities_count": len(valid_entities) + len(machines)
-        }
+            "memories_count": memory_count,
+            "entities_count": entity_count,
+        },
     }
 
 # -------------------------------------------------------------------------
